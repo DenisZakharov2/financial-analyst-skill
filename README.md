@@ -1,5 +1,7 @@
 # Financial Analyst Skill
 
+[![ci](https://github.com/DenisZakharov2/financial-analyst-skill/actions/workflows/ci.yml/badge.svg)](https://github.com/DenisZakharov2/financial-analyst-skill/actions/workflows/ci.yml)
+
 Скилл финансового аналитика для Hermes Agent: считает метрики по портфелю,
 воронке, финансам и рыночной статистике и собирает отчёт с проверяемыми числами.
 
@@ -44,7 +46,7 @@ python skills/financial-analyst/scripts/analyze.py \
 ## Установка как скилла Hermes
 
 ```bash
-git clone <this-repo> ~/financial-analyst-skill
+git clone https://github.com/DenisZakharov2/financial-analyst-skill.git ~/financial-analyst-skill
 ln -s ~/financial-analyst-skill/skills/financial-analyst ~/.hermes/skills/financial-analyst
 ```
 
