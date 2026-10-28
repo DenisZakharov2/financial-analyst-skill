@@ -1,7 +1,7 @@
 ---
 name: financial-analyst
 description: "Финансовая аналитика: портфель, воронка, прогноз."
-version: 1.0.0
+version: 1.0.1
 author: Denis Zakharov (@DenisZakharov2), Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -37,7 +37,9 @@ metadata:
 
 ## Prerequisites
 
-- Python 3.10+ (проверено на 3.12) и зависимости: `pip install -r requirements.txt`.
+- Python 3.10+ (проверено на 3.12) и зависимости из `requirements.txt` в корне
+  репозитория: `pip install -r requirements.txt`. Если скилл скопирован без
+  репозитория, поставьте пакеты из `pyproject.toml` вручную.
 - Шрифт с кириллицей для PDF: берётся из matplotlib, отдельная установка не нужна.
   Если matplotlib недоступен, положите `DejaVuSans.ttf` в `assets/fonts/`.
 - Сеть не требуется: Plotly встраивается в дашборд, внешних CDN нет.
@@ -69,12 +71,14 @@ metadata:
 `macro_survey`.
 
 Полные схемы, типы и примеры — `references/data-dictionary.md`. Поддерживаются
-CSV, XLS, XLSX. Широкие листы Excel разбираются адаптером `cbr_survey`.
+CSV, XLS, XLSX. Широкие листы Excel разбираются адаптером `cbr_survey`: в режиме
+`auto` он ищет книгу `stat_*.xlsx`, для другого имени нужен `--adapter cbr`.
 Если таблицы нет, раздел пропускается с предупреждением, а не с нулём.
 
 ## Выходные артефакты
 
-- `metrics.json` — разделы, допущения, предупреждения, контроль качества, headline.
+- `metrics.json` — разделы, допущения, предупреждения, контроль качества, headline
+  (`value` — строка для отчёта, `raw` — то же число для XLSX и сверки).
 - `metrics.csv` — плоский список чисел для сверки и трассировки.
 - `charts/*.png` — графики, только если в данных есть что рисовать.
 - `financial_analyst_report.{docx,pdf,xlsx,pptx,rtf}` — отчёт с таблицами и графиками.

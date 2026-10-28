@@ -146,9 +146,12 @@ def chart_anomalies(anomalies: pd.DataFrame, path: Path, label: str = "") -> Pat
         _empty(path)
         return None
     data = anomalies.sort_values("_z")
+    labels = (data["period_start"].dt.strftime("%Y-%m-%d")
+              if pd.api.types.is_datetime64_any_dtype(data["period_start"])
+              else data["period_start"].astype(str))
     fig, ax = plt.subplots(figsize=(10, 4.5))
     colors = [PALETTE["negative"] if value > 0 else PALETTE["positive"] for value in data["_z"]]
-    ax.barh(data["period_start"].astype(str), data["_z"], color=colors, height=0.6)
+    ax.barh(labels, data["_z"], color=colors, height=0.6)
     ax.axvline(3, color=PALETTE["negative"], linestyle="--", linewidth=1)
     ax.axvline(-3, color=PALETTE["negative"], linestyle="--", linewidth=1)
     ax.set_xlabel("Робастный Z-score")

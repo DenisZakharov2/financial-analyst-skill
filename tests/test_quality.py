@@ -64,3 +64,12 @@ def test_macro_survey_period_check():
     report = validate_inputs({"macro_survey": survey})
     check = next(item for item in report.checks if item.check_id == "macro_survey_periods")
     assert check.status == "fail"
+
+
+def test_missing_required_columns_are_warned():
+    portfolio = pd.DataFrame({"client_id": ["C1"], "balance": [10.0]})
+    report = validate_inputs(_tables(portfolio))
+    check = next(item for item in report.checks if item.check_id == "portfolio_required_columns")
+    assert check.status == "warn"
+    assert "account_id" in check.detail and "dpd" in check.detail
+    assert not report.failed

@@ -76,3 +76,68 @@ def test_macro_tables_are_analyzed(tmp_path):
     names = [item["section"] for item in metrics["metrics"]]
     assert "Вклады и депозиты: структура" in names
     assert "Вклады и депозиты: динамика" in names
+
+
+def _write_survey(data, periods: int = 8) -> None:
+    dates = pd.date_range("2023-01-01", periods=periods, freq="MS")
+    rows = [
+        {"period": date.strftime("%Y-%m"),
+         "industry": industry,
+         "indicator": "Индикатор бизнес-климата",
+         "value": 1.0 + 0.1 * index}
+        for index, date in enumerate(dates)
+        for industry in ("Экономика всего", "Обрабатывающие производства")
+    ]
+    pd.DataFrame(rows).to_csv(data / "macro_survey.csv", index=False)
+
+
+def test_macro_survey_csv_is_normalized(tmp_path):
+    data = tmp_path / "survey"
+    data.mkdir()
+    _write_survey(data)
+    out = tmp_path / "out"
+    assert main(["--data-dir", str(data), "--out", str(out), "--format", "xlsx", "--quiet"]) == 0
+    metrics = json.loads((out / "metrics.json").read_text(encoding="utf-8"))
+    assert metrics["sections"]["macro"]["indicator"] == "Индикатор бизнес-климата"
+    assert metrics["sections"]["forecast"]["available"]
+    assert not (out / "dashboard.html").exists(), "дашборд не запрошен в --format"
+
+
+def test_unknown_indicator_returns_data_error(tmp_path):
+    data = tmp_path / "survey"
+    data.mkdir()
+    _write_survey(data)
+    code = main(["--data-dir", str(data), "--out", str(tmp_path / "out"),
+                 "--format", "xlsx", "--indicator", "Нет такого", "--quiet"])
+    assert code == 2
+
+
+
+
+def test_metrics_json_has_no_nan(tmp_path):
+    data = tmp_path / "data"
+    data.mkdir()
+    pd.DataFrame({"account_id": ["A1", "A2"], "balance": [10.0, 20.0], "dpd": [0, 5]}).to_csv(
+        data / "portfolio.csv", index=False)
+    out = tmp_path / "out"
+    assert main(["--data-dir", str(data), "--out", str(out), "--format", "xlsx", "--quiet"]) == 0
+    text = (out / "metrics.json").read_text(encoding="utf-8")
+    assert "NaN" not in text
+    metrics = json.loads(text)
+    assert metrics["sections"]["portfolio"]["totals"]["top10_clients_share_pct"] is None
+
+
+
+def test_cbr_adapter_accepts_any_workbook_name(tmp_path):
+    data = tmp_path / "survey"
+    data.mkdir()
+    rows = [["Период", "Индикатор бизнес-климата"]]
+    for index, date in enumerate(pd.date_range("2023-01-01", periods=8, freq="MS")):
+        rows.append([date.strftime("%Y-%m"), 1.0 + index])
+    pd.DataFrame(rows).to_excel(data / "opros.xlsx", sheet_name="Экономика всего",
+                                header=False, index=False)
+    out = tmp_path / "out"
+    assert main(["--data-dir", str(data), "--out", str(out), "--format", "xlsx",
+                 "--adapter", "cbr", "--quiet"]) == 0
+    metrics = json.loads((out / "metrics.json").read_text(encoding="utf-8"))
+    assert metrics["sections"]["macro"]["indicator"] == "Индикатор бизнес-климата"

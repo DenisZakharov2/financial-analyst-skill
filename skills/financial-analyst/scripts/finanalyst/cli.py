@@ -18,6 +18,8 @@ import pandas as pd
 from . import __version__
 from .adapters import cbr_survey, client_csv
 from .core import (
+    KNOWN_TABLES,
+    WORKBOOK_SUFFIXES,
     DataLoadError,
     assert_no_blocking_failures,
     load_tables,
@@ -82,6 +84,15 @@ def short(text: str, limit: int = 70) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
+def headline_row(label: str, value, unit: str, source: str, digits: int = 2) -> dict:
+    """Ключевой показатель: форматированная строка для отчёта и число для XLSX/JSON."""
+    raw = value
+    if raw is None or (isinstance(raw, float) and np.isnan(raw)):
+        raw = None
+    return {"label": label, "value": fmt_num(value, digits), "raw": raw,
+            "digits": digits, "unit": unit, "source": source}
+
+
 # --------------------------------------------------------------------------
 # Сериализация
 # --------------------------------------------------------------------------
@@ -99,6 +110,35 @@ def records(frame: pd.DataFrame | None) -> list[dict]:
         if pd.api.types.is_datetime64_any_dtype(frame[column]):
             clean[column] = frame[column].dt.strftime("%Y-%m-%d")
     return clean.to_dict(orient="records")
+
+
+def json_ready(value):
+    """Привести значение к строгому JSON: NaN и NaT → ``null``, numpy → Python.
+
+    ``json.dumps`` по умолчанию пишет ``NaN``, а это невалидный JSON и нарушает
+    правило «в metrics.json только null с причиной».
+    """
+    if isinstance(value, dict):
+        return {key: json_ready(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_ready(item) for item in value]
+    if value is None or value is pd.NaT:
+        return None
+    if isinstance(value, (np.bool_,)):
+        return bool(value)
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.floating, float)):
+        number = float(value)
+        return None if np.isnan(number) or np.isinf(number) else number
+    if isinstance(value, (pd.Timestamp,)):
+        return value.strftime("%Y-%m-%d")
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return value
 
 
 def flatten_metrics(sections: list[tuple[str, pd.DataFrame, str]]) -> list[dict]:
@@ -152,6 +192,8 @@ def run(args: argparse.Namespace) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     charts_dir = out_dir / "charts"
     charts_dir.mkdir(exist_ok=True)
+    for stale_chart in charts_dir.glob("*.png"):
+        stale_chart.unlink()
     for stale in ("dashboard.html", "financial_analyst_report.html", "report.html"):
         (out_dir / stale).unlink(missing_ok=True)
     setup_matplotlib()
@@ -159,32 +201,53 @@ def run(args: argparse.Namespace) -> int:
     tables = load_tables(data_dir)
     notes: list[str] = []
 
-    survey_paths = [p for p in data_dir.iterdir()
-                    if p.suffix.lower() in {".xls", ".xlsx"} and p.name.lower().startswith("stat_")]
-    if args.adapter in {"auto", "cbr"} and survey_paths:
-        survey = cbr_survey.parse_workbook(survey_paths[0])
-        if not survey.empty:
+    workbook_paths = sorted(path for path in data_dir.iterdir()
+                            if path.suffix.lower() in WORKBOOK_SUFFIXES)
+    # В auto берём только выгрузки с префиксом stat_: в одном каталоге могут лежать
+    # и клиентские книги. С --adapter cbr разбираем любую книгу, которая читается.
+    survey_paths = ([path for path in workbook_paths if path.name.lower().startswith("stat_")]
+                    if args.adapter == "auto" else workbook_paths)
+    survey_file: Path | None = None
+    if args.adapter in {"auto", "cbr"}:
+        for path in survey_paths:
+            survey = cbr_survey.parse_workbook(path)
+            if survey.empty:
+                continue
             survey = normalize_periods(survey)
             tables["macro_survey"] = survey
+            survey_file = path
             count = f"{len(survey):,}".replace(",", " ")
-            notes.append(f"Выгрузка {survey_paths[0].name}: {count} строк, "
+            notes.append(f"Выгрузка {path.name}: {count} строк, "
                          f"{survey['industry'].nunique()} отраслей, "
                          f"{survey['indicator'].nunique()} показателей.")
+            break
+        else:
+            if args.adapter == "auto" and survey_paths:
+                notes.append("Книга stat_*.xlsx найдена, но выгрузка опросов не распознана: "
+                             "проверьте строку заголовков и листы.")
+            elif args.adapter == "auto" and workbook_paths:
+                notes.append("Книга с опросами не найдена: адаптер ищет файл stat_*.xlsx. "
+                             "Для файла с другим именем запустите с --adapter cbr.")
     if args.adapter == "client":
         tables.pop("macro_survey", None)
 
     tables, alias_notes = client_csv.normalize(tables)
     notes.extend(alias_notes)
 
-    known = {"clients", "products", "portfolio", "accounts", "sales", "applications",
-             "funnel_events", "transactions", "finance", "macro_deposits", "macro_loans",
-             "macro_profit", "macro_securities", "macro_survey"}
-    service = {path.stem for path in survey_paths}
+    survey_table = tables.get("macro_survey")
+    if survey_table is not None and "period_start" not in survey_table.columns:
+        if "period" in survey_table.columns:
+            tables["macro_survey"] = normalize_periods(survey_table)
+        else:
+            notes.append("macro_survey: нет колонки period — раздел пропущен.")
+            tables.pop("macro_survey")
+
+    service = {survey_file.stem} if survey_file is not None else set()
     for key in list(tables):
         if key in service or key.lower().startswith("отчет"):
             tables.pop(key)
             continue
-        if key not in known:
+        if key not in KNOWN_TABLES:
             notes.append(f"Пропущена таблица {key!r}: её нет в словаре данных.")
             tables.pop(key)
 
@@ -229,13 +292,13 @@ def run(args: argparse.Namespace) -> int:
             "totals": result["totals"], "rows": records(frame),
         }
         total_balance = result["totals"]["total_balance"]
-        headline.append({"label": "Остаток по портфелю", "value": fmt_num(total_balance / 1e6, 1),
-                         "unit": "млн руб.", "source": "portfolio.balance"})
-        headline.append({"label": "Счетов в портфеле", "value": fmt_num(result["totals"]["accounts"], 0),
-                         "unit": "шт.", "source": "portfolio.account_id"})
+        headline.append(headline_row("Остаток по портфелю", total_balance / 1e6, "млн руб.",
+                                     "portfolio.balance", digits=1))
+        headline.append(headline_row("Счетов в портфеле", result["totals"]["accounts"], "шт.",
+                                     "portfolio.account_id", digits=0))
         if result["totals"].get("par30_pct") is not None:
-            headline.append({"label": "PAR 30", "value": fmt_num(result["totals"]["par30_pct"], 2),
-                             "unit": "%", "source": "portfolio.dpd"})
+            headline.append(headline_row("PAR 30", result["totals"]["par30_pct"], "%",
+                                         "portfolio.dpd"))
         chart = chart_portfolio(frame, charts_dir / "portfolio.png")
         if chart:
             charts["Портфель по типам продуктов"] = chart
@@ -256,10 +319,10 @@ def run(args: argparse.Namespace) -> int:
             "assumption": funnel["assumption"],
         }
         last = funnel["rows"].iloc[-1]
-        headline.append({"label": "Сквозная конверсия", "value": fmt_num(last["from_start_pct"], 2),
-                         "unit": "%", "source": "funnel_events"})
-        headline.append({"label": "Участников воронки", "value": fmt_num(funnel["entities"], 0),
-                         "unit": funnel["entity"], "source": "funnel_events"})
+        headline.append(headline_row("Сквозная конверсия", last["from_start_pct"], "%",
+                                     "funnel_events"))
+        headline.append(headline_row("Участников воронки", funnel["entities"], funnel["entity"],
+                                     "funnel_events", digits=0))
         chart = chart_funnel(funnel["rows"], charts_dir / "funnel.png")
         if chart:
             charts["Воронка продаж"] = chart
@@ -272,11 +335,10 @@ def run(args: argparse.Namespace) -> int:
                                                             "прямые расходы = фондирование + резервы."))
         totals = fin["totals"]
         metrics_payload["sections"]["finance"] = {"totals": totals, "rows": records(fin["rows"])}
-        headline.append({"label": "Выручка", "value": fmt_num(totals["revenue"] / 1e6, 1),
-                         "unit": "млн руб.", "source": "finance"})
+        headline.append(headline_row("Выручка", totals["revenue"] / 1e6, "млн руб.", "finance",
+                                     digits=1))
         if totals.get("margin_pct") is not None:
-            headline.append({"label": "Валовая маржа", "value": fmt_num(totals["margin_pct"], 2),
-                             "unit": "%", "source": "finance"})
+            headline.append(headline_row("Валовая маржа", totals["margin_pct"], "%", "finance"))
         unit = unit_economics(finance, clients, portfolio, tables.get("sales"),
                               lifetime_months=args.lifetime_months)
         assumptions.extend(unit["assumptions"])
@@ -293,13 +355,23 @@ def run(args: argparse.Namespace) -> int:
                          f"Срок жизни клиента: {unit['lifetime_months']:.0f} мес."))
         metrics_payload["sections"]["unit_economics"] = unit
         if unit["ltv_cac"] is not None:
-            headline.append({"label": "LTV / CAC", "value": fmt_num(unit["ltv_cac"], 2),
-                             "unit": "x", "source": "finance, portfolio"})
+            headline.append(headline_row("LTV / CAC", unit["ltv_cac"], "x", "finance, portfolio"))
 
     # --- Макро ------------------------------------------------------------
     indicator = None
     if survey is not None and not survey.empty:
+        missing = sorted({"period_start", "industry", "indicator", "value"} - set(survey.columns))
+        if missing:
+            warnings.append(f"macro_survey: нет колонок {', '.join(missing)} — рыночный раздел пропущен.")
+            survey = None
+    if survey is not None and not survey.empty:
         indicator = args.indicator or cbr_survey.choose_indicator(survey)
+        available = sorted(str(value) for value in survey["indicator"].dropna().unique())
+        if indicator not in available:
+            raise MetricError(
+                "Показатель %r не найден в macro_survey. Доступны: %s"
+                % (indicator, ", ".join(available[:10]) or "нет")
+            )
         industry = _pick_industry(survey, indicator)
         series = _series(survey, indicator, industry)
         sections.append(("Макро: динамика показателя", series.tail(36).assign(
@@ -316,8 +388,8 @@ def run(args: argparse.Namespace) -> int:
             "points": int(len(series)),
             "anomalies": records(anomalies),
         }
-        headline.append({"label": f"{short(indicator)} (последнее)", "value": fmt_num(series["value"].iloc[-1], 2),
-                         "unit": "п.", "source": f"macro_survey, {industry}"})
+        headline.append(headline_row(f"{short(indicator)} (последнее)", series["value"].iloc[-1],
+                                     "п.", f"macro_survey, {industry}"))
         chart = chart_series(series, "value", "period_start", charts_dir / "macro.png",
                              label=industry)
         if chart:
@@ -341,8 +413,9 @@ def run(args: argparse.Namespace) -> int:
             if chart:
                 charts["Прогноз по сценариям"] = chart
 
-        build_dashboard(survey, indicator, out_dir / "dashboard.html",
-                        title=f"Дашборд: {indicator}")
+        if "html" in formats:
+            build_dashboard(survey, indicator, out_dir / "dashboard.html",
+                            title=f"Дашборд: {indicator}")
 
     # --- Рыночные таблицы (macro_*) --------------------------------------
     macro_specs = {
@@ -377,9 +450,8 @@ def run(args: argparse.Namespace) -> int:
                              charts_dir / f"{key}.png", title=f"{title}: динамика")
         if chart:
             charts[f"{title}: динамика"] = chart
-        headline.append({"label": f"{title} (последнее)",
-                         "value": fmt_num(totals[value_col].iloc[-1], 2),
-                         "unit": "млн руб.", "source": key})
+        headline.append(headline_row(f"{title} (последнее)", totals[value_col].iloc[-1],
+                                     "млн руб.", key))
         metrics_payload["sections"][key] = {
             "rows": records(view), "anomalies": records(anomalies),
         }
@@ -390,7 +462,8 @@ def run(args: argparse.Namespace) -> int:
     metrics_payload["headline"] = headline
     metrics_payload["notes"] = notes
     (out_dir / "metrics.json").write_text(
-        json.dumps(metrics_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        json.dumps(json_ready(metrics_payload), ensure_ascii=False, indent=2, allow_nan=False),
+        encoding="utf-8")
     pd.DataFrame(metric_rows).to_csv(out_dir / "metrics.csv", index=False, encoding="utf-8-sig")
 
     # --- Отчёты -----------------------------------------------------------

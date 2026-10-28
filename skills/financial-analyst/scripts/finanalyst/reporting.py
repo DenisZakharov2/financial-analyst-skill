@@ -20,6 +20,54 @@ from .core import QualityReport
 
 PAGE_WIDTH_INCHES = 6.5
 
+# Подписи колонок для отчётов: в metrics.json остаются машинные имена полей,
+# в DOCX/PDF/XLSX/PPTX/HTML — русские заголовки.
+COLUMN_TITLES = {
+    "label": "Показатель",
+    "value": "Значение",
+    "unit": "Ед.",
+    "source": "Источник",
+    "period": "Период",
+    "period_start": "Период",
+    "period_type": "Тип периода",
+    "product_type": "Тип продукта",
+    "product_code": "Продукт",
+    "accounts": "Счетов",
+    "clients": "Клиентов",
+    "total_balance": "Остаток, руб.",
+    "total_limit": "Лимит, руб.",
+    "avg_balance": "Средний остаток, руб.",
+    "avg_limit": "Средний лимит, руб.",
+    "avg_dpd": "Средний DPD, дн.",
+    "par30_pct": "PAR 30, %",
+    "par60_pct": "PAR 60, %",
+    "par90_pct": "PAR 90, %",
+    "stage": "Этап",
+    "reached": "Дошедшие",
+    "from_start_pct": "% от лида",
+    "stage_pct": "% от этапа",
+    "lost": "Потери",
+    "revenue": "Выручка",
+    "direct_costs": "Прямые расходы",
+    "gross_margin": "Валовая маржа",
+    "contribution": "Contribution",
+    "opex": "Операционные расходы",
+    "margin_pct": "Маржа, %",
+    "category": "Категория",
+    "instrument_type": "Инструмент",
+    "value_mln_rub": "Значение, млн руб.",
+    "profit_total_mln_rub": "Прибыль, млн руб.",
+    "share_pct": "Доля, %",
+    "change_pct": "Темп, %",
+    "yoy_pct": "YoY, %",
+    "_z": "Z-score",
+}
+
+
+def column_title(column: str) -> str:
+    """Русская подпись колонки; неизвестное имя остаётся как есть."""
+    return COLUMN_TITLES.get(str(column), str(column))
+
 
 @dataclass
 class ReportData:
@@ -54,15 +102,28 @@ def fmt_num(value, digits: int = 2) -> str:
     return text
 
 
+def _fmt_pct(value, digits: int = 2) -> str:
+    """Процент с запятой как десятичным разделителем (правило style-ru)."""
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return "—"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    return f"{number:,.{digits}f}".replace(",", " ").replace(".", ",") + " %"
+
+
 def _fmt_cell(value, column: str = "") -> str:
     if isinstance(value, (pd.Timestamp,)):
         return value.strftime("%d.%m.%Y")
     if isinstance(value, str):
         return value
     if column.endswith("_pct") or column in {"share_pct", "from_start_pct", "stage_pct"}:
-        return "—" if pd.isna(value) else f"{float(value):.2f} %"
-    if column in {"_z"}:
-        return "—" if pd.isna(value) else f"{float(value):.2f}"
+        return _fmt_pct(value)
+    if column == "_z":
+        if pd.isna(value):
+            return "—"
+        return f"{float(value):.2f}".replace(".", ",")
     return fmt_num(value)
 
 
@@ -71,6 +132,7 @@ def _table_for_output(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     for column in out.columns:
         out[column] = out[column].map(lambda value, c=column: _fmt_cell(value, c))
+    out.columns = [column_title(column) for column in out.columns]
     return out
 
 
@@ -359,10 +421,17 @@ def write_xlsx(report: ReportData, path: Path) -> Path:
         row += 1
         for item in report.headline:
             sheet.cell(row=row, column=1, value=str(item.get("label", "")))
-            value = item.get("value")
-            cell = sheet.cell(row=row, column=2, value=value if isinstance(value, (int, float)) else str(value))
-            if isinstance(value, (int, float)):
-                cell.number_format = "# ##0.##"
+            raw = item.get("raw")
+            value = raw if raw is not None else item.get("value")
+            cell = sheet.cell(row=row, column=2, value=value)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                digits = max(int(item.get("digits", 2)), 0)
+                if isinstance(value, float):
+                    cell.number_format = "# ##0" + ("." + "0" * digits if digits else "")
+                else:
+                    cell.number_format = "# ##0"
+            else:
+                cell.value = str(value)
             sheet.cell(row=row, column=3, value=str(item.get("unit", "")))
             sheet.cell(row=row, column=4, value=str(item.get("source", "")))
             row += 1
@@ -378,7 +447,7 @@ def write_xlsx(report: ReportData, path: Path) -> Path:
         if note:
             ws.cell(row=2, column=1, value=note).font = Font(size=9, italic=True, color="6B7280")
         for j, column in enumerate(frame.columns, start=1):
-            cell = ws.cell(row=start, column=j, value=str(column))
+            cell = ws.cell(row=start, column=j, value=column_title(column))
             cell.font = Font(bold=True)
             cell.fill = PatternFill("solid", start_color="F3F4F6")
             cell.alignment = Alignment(vertical="center", wrap_text=True)
@@ -397,7 +466,7 @@ def write_xlsx(report: ReportData, path: Path) -> Path:
                 elif isinstance(value, int):
                     cell.number_format = "# ##0"
         for j, column in enumerate(frame.columns, start=1):
-            width = max(10, min(38, len(str(column)) + 4))
+            width = max(10, min(38, len(column_title(column)) + 4))
             ws.column_dimensions[get_column_letter(j)].width = width
         ws.freeze_panes = ws.cell(row=start + 1, column=1)
         ws.auto_filter.ref = f"A{start}:{get_column_letter(len(frame.columns))}{start + len(frame)}"
@@ -406,7 +475,7 @@ def write_xlsx(report: ReportData, path: Path) -> Path:
         ws = workbook.create_sheet("Контроль качества")
         view = report.quality
         for j, column in enumerate(view.columns, start=1):
-            cell = ws.cell(row=1, column=j, value=str(column))
+            cell = ws.cell(row=1, column=j, value=column_title(column))
             cell.font = Font(bold=True)
         for i, (_, source_row) in enumerate(view.iterrows(), start=2):
             for j, column in enumerate(view.columns, start=1):
@@ -483,7 +552,7 @@ def write_pptx(report: ReportData, path: Path) -> Path:
                                        Inches(12.1), Inches(0.4 + 0.32 * rows))
         table = shape.table
         for j, column in enumerate(frame.columns[:columns]):
-            table.cell(0, j).text = str(column)
+            table.cell(0, j).text = column_title(column)
             for paragraph in table.cell(0, j).text_frame.paragraphs:
                 paragraph.font.size = Pt(10)
                 paragraph.font.bold = True
@@ -724,8 +793,12 @@ def write_reports(report: ReportData, out_dir: Path, formats: list[str]) -> dict
     return created
 
 
+STATUS_TITLES = {"pass": "пройдено", "warn": "предупреждение", "fail": "ошибка"}
+
+
 def quality_frame(report: QualityReport) -> pd.DataFrame:
     return pd.DataFrame([
-        {"Проверка": check.check_id, "Статус": check.status, "Детали": check.detail}
+        {"Проверка": check.check_id, "Статус": STATUS_TITLES.get(check.status, check.status),
+         "Детали": check.detail}
         for check in report.checks
     ])

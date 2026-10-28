@@ -1,6 +1,6 @@
 import pandas as pd
 import pytest
-from finanalyst.core import normalize_periods, parse_period
+from finanalyst.core import canonical_period, normalize_periods, parse_period
 
 
 @pytest.mark.parametrize("value,expected,kind", [
@@ -29,3 +29,14 @@ def test_normalize_periods_sorts_by_date_not_string():
     result = normalize_periods(frame)
     assert list(result["value"]) == [2, 1, 3]
     assert result["period_start"].is_monotonic_increasing
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("2024-01", "2024-01"),
+    ("01.2024", "2024-01"),
+    ("январь 2024", "2024-01"),
+    ("1к2024", "2024-01"),
+    ("нет данных", "нет данных"),
+])
+def test_canonical_period(value, expected):
+    assert canonical_period(value) == expected

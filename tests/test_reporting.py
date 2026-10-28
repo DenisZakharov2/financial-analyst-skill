@@ -15,7 +15,8 @@ def report(tmp_path_factory):
     return ReportData(
         title="Финансовый аналитический отчёт",
         subtitle="Тестовая выгрузка",
-        headline=[{"label": "PAR 30", "value": "5,04", "unit": "%", "source": "portfolio.dpd"}],
+        headline=[{"label": "PAR 30", "value": "5,04", "raw": 5.04, "unit": "%",
+                   "source": "portfolio.dpd"}],
         assumptions=["Этап считается максимальным достигнутым."],
         notes=["Строк в выгрузке: 120."],
         warnings=["В портфеле две валюты."],
@@ -58,6 +59,24 @@ def test_xlsx_keeps_numbers_numeric(report, tmp_path):
     sheet = workbook["Воронка продаж"]
     values = [cell for row in sheet.iter_rows(min_row=4, max_row=4) for cell in row]
     assert any(cell.data_type == "n" for cell in values)
+
+
+def test_xlsx_headline_value_is_numeric(report, tmp_path):
+    from openpyxl import load_workbook
+    write_reports(report, tmp_path, ["xlsx"])
+    sheet = load_workbook(tmp_path / "financial_analyst_report.xlsx")["Отчёт"]
+    cells = [cell for row in sheet.iter_rows(min_row=1, max_row=8, max_col=2) for cell in row]
+    headline = [cell for cell in cells if cell.value == 5.04]
+    assert headline and headline[0].data_type == "n"
+
+
+def test_report_tables_use_russian_headers(report, tmp_path):
+    from openpyxl import load_workbook
+    write_reports(report, tmp_path, ["xlsx"])
+    sheet = load_workbook(tmp_path / "financial_analyst_report.xlsx")["Воронка продаж"]
+    headers = [cell.value for cell in sheet[3]]
+    assert "Этап" in headers and "Дошедшие" in headers
+    assert "stage" not in headers
 
 
 def test_html_has_tables_and_images(report, tmp_path):
