@@ -1,0 +1,38 @@
+[project]
+name = "financial-analyst-skill"
+version = "1.0.0"
+description = "Financial analyst skill for Hermes Agent: portfolio, funnel, unit economics, forecasting"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "Denis Zakharov"}]
+dependencies = [
+    "pandas>=2.0",
+    "numpy>=1.24",
+    "matplotlib>=3.7",
+    "plotly>=5.18",
+    "python-docx>=1.1",
+    "python-pptx>=0.6.23",
+    "openpyxl>=3.1",
+    "reportlab>=4.0",
+    "xlrd>=2.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.6", "pypdf>=4.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["skills/financial-analyst/scripts"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+exclude = [".venv", "reports"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402"]
