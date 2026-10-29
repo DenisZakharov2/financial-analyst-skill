@@ -1,6 +1,6 @@
 import pandas as pd
 import pytest
-from finanalyst.reporting import ReportData, lint_text, write_html, write_reports
+from finanalyst.reporting import ReportData, lint_text, quality_frame, write_html, write_reports
 from finanalyst.visuals import chart_funnel, setup_matplotlib
 
 
@@ -15,7 +15,8 @@ def report(tmp_path_factory):
     return ReportData(
         title="Финансовый аналитический отчёт",
         subtitle="Тестовая выгрузка",
-        headline=[{"label": "PAR 30", "value": "5,04", "unit": "%", "source": "portfolio.dpd"}],
+        headline=[{"label": "PAR 30", "value": "5,04", "raw": 5.04, "unit": "%",
+                   "source": "portfolio.dpd"}],
         assumptions=["Этап считается максимальным достигнутым."],
         notes=["Строк в выгрузке: 120."],
         warnings=["В портфеле две валюты."],
@@ -60,12 +61,46 @@ def test_xlsx_keeps_numbers_numeric(report, tmp_path):
     assert any(cell.data_type == "n" for cell in values)
 
 
+def test_xlsx_headline_value_is_numeric(report, tmp_path):
+    from openpyxl import load_workbook
+    write_reports(report, tmp_path, ["xlsx"])
+    sheet = load_workbook(tmp_path / "financial_analyst_report.xlsx")["Отчёт"]
+    cells = [cell for row in sheet.iter_rows(min_row=1, max_row=8, max_col=2) for cell in row]
+    headline = [cell for cell in cells if cell.value == 5.04]
+    assert headline and headline[0].data_type == "n"
+
+
+def test_report_tables_use_russian_headers(report, tmp_path):
+    from openpyxl import load_workbook
+    write_reports(report, tmp_path, ["xlsx"])
+    sheet = load_workbook(tmp_path / "financial_analyst_report.xlsx")["Воронка продаж"]
+    headers = [cell.value for cell in sheet[3]]
+    assert "Этап" in headers and "Дошедшие" in headers
+    assert "stage" not in headers
+
+
 def test_html_has_tables_and_images(report, tmp_path):
     path = write_html(report, tmp_path / "report.html")
     text = path.read_text(encoding="utf-8")
     assert "<table>" in text
     assert "data:image/png;base64" in text
     assert "@media" in text
+    assert 'class="num"' in text
+
+
+def test_quality_frame_has_russian_titles_and_codes():
+    from finanalyst.core import QualityReport
+
+    quality = QualityReport()
+    quality.add("portfolio_pk_unique", True, "Дубли account_id: 0")
+    quality.add("finance_required_columns", False, "Нет колонок product_code", warn_only=True)
+    frame = quality_frame(quality)
+    assert list(frame.columns) == ["Проверка", "Код", "Статус", "Детали"]
+    assert frame.iloc[0]["Проверка"] == "Уникальность account_id"
+    assert frame.iloc[0]["Статус"] == "пройдено"
+    assert frame.iloc[1]["Проверка"] == "Обязательные колонки: finance"
+    assert frame.iloc[1]["Код"] == "finance_required_columns"
+    assert frame.iloc[1]["Статус"] == "предупреждение"
 
 
 def test_lint_text_catches_problems():

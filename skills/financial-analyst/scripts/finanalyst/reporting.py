@@ -20,6 +20,69 @@ from .core import QualityReport
 
 PAGE_WIDTH_INCHES = 6.5
 
+# Подписи колонок для отчётов: в metrics.json остаются машинные имена полей,
+# в DOCX/PDF/XLSX/PPTX/HTML — русские заголовки.
+COLUMN_TITLES = {
+    "label": "Показатель",
+    "value": "Значение",
+    "unit": "Ед.",
+    "source": "Источник",
+    "period": "Период",
+    "period_start": "Период",
+    "period_type": "Тип периода",
+    "product_type": "Тип продукта",
+    "product_code": "Продукт",
+    "accounts": "Счетов",
+    "clients": "Клиентов",
+    "total_balance": "Остаток, руб.",
+    "total_limit": "Лимит, руб.",
+    "avg_balance": "Средний остаток, руб.",
+    "avg_limit": "Средний лимит, руб.",
+    "avg_dpd": "Средний DPD, дн.",
+    "par30_pct": "PAR 30, %",
+    "par60_pct": "PAR 60, %",
+    "par90_pct": "PAR 90, %",
+    "stage": "Этап",
+    "reached": "Дошедшие",
+    "from_start_pct": "% от лида",
+    "stage_pct": "% от этапа",
+    "lost": "Потери",
+    "revenue": "Выручка",
+    "direct_costs": "Прямые расходы",
+    "gross_margin": "Валовая маржа",
+    "contribution": "Contribution",
+    "opex": "Операционные расходы",
+    "margin_pct": "Маржа, %",
+    "category": "Категория",
+    "instrument_type": "Инструмент",
+    "value_mln_rub": "Значение, млн руб.",
+    "profit_total_mln_rub": "Прибыль, млн руб.",
+    "share_pct": "Доля, %",
+    "change_pct": "Темп, %",
+    "yoy_pct": "YoY, %",
+    "_z": "Z-score",
+    "indicator_1": "Показатель 1",
+    "indicator_2": "Показатель 2",
+    "n": "Наблюдений",
+    "pearson": "Пирсон",
+    "spearman": "Спирмен",
+    "p_value": "p-value",
+    "пессимистичный": "Пессимистичный",
+    "базовый": "Базовый",
+    "оптимистичный": "Оптимистичный",
+}
+
+
+def column_title(column: str) -> str:
+    """Русская подпись колонки; неизвестное имя остаётся как есть."""
+    return COLUMN_TITLES.get(str(column), str(column))
+
+
+def _numeric_positions(frame: pd.DataFrame) -> set[int]:
+    """Индексы числовых колонок: по ним числа выравниваются вправо."""
+    return {index for index, column in enumerate(frame.columns)
+            if pd.api.types.is_numeric_dtype(frame[column])}
+
 
 @dataclass
 class ReportData:
@@ -54,15 +117,28 @@ def fmt_num(value, digits: int = 2) -> str:
     return text
 
 
+def _fmt_pct(value, digits: int = 2) -> str:
+    """Процент с запятой как десятичным разделителем (правило style-ru)."""
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return "—"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    return f"{number:,.{digits}f}".replace(",", " ").replace(".", ",") + " %"
+
+
 def _fmt_cell(value, column: str = "") -> str:
     if isinstance(value, (pd.Timestamp,)):
         return value.strftime("%d.%m.%Y")
     if isinstance(value, str):
         return value
     if column.endswith("_pct") or column in {"share_pct", "from_start_pct", "stage_pct"}:
-        return "—" if pd.isna(value) else f"{float(value):.2f} %"
-    if column in {"_z"}:
-        return "—" if pd.isna(value) else f"{float(value):.2f}"
+        return _fmt_pct(value)
+    if column == "_z":
+        if pd.isna(value):
+            return "—"
+        return f"{float(value):.2f}".replace(".", ",")
     return fmt_num(value)
 
 
@@ -71,6 +147,7 @@ def _table_for_output(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     for column in out.columns:
         out[column] = out[column].map(lambda value, c=column: _fmt_cell(value, c))
+    out.columns = [column_title(column) for column in out.columns]
     return out
 
 
@@ -121,9 +198,12 @@ def write_docx(report: ReportData, path: Path) -> Path:
     style = document.styles["Normal"]
     style.font.name = "Segoe UI"
     style.font.size = Pt(10)
+    document.styles["Heading 1"].font.size = Pt(16)
 
     title = document.add_heading(report.title, level=0)
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    for run in title.runs:
+        run.font.size = Pt(26)
     if report.subtitle:
         subtitle = document.add_paragraph(report.subtitle)
         subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -166,6 +246,7 @@ def write_docx(report: ReportData, path: Path) -> Path:
             document.add_paragraph("Нет данных для этого раздела.")
             continue
         view = _table_for_output(frame)
+        numeric = _numeric_positions(frame)
         table = document.add_table(rows=1, cols=len(view.columns))
         try:
             table.style = "Light Grid Accent 1"
@@ -175,8 +256,10 @@ def write_docx(report: ReportData, path: Path) -> Path:
             cell.text = str(column)
         for _, row in view.iterrows():
             cells = table.add_row().cells
-            for cell, value in zip(cells, row.values):
+            for position, (cell, value) in enumerate(zip(cells, row.values)):
                 cell.text = str(value)
+                if position in numeric:
+                    cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.RIGHT
 
     if report.warnings:
         document.add_heading("Ограничения и предупреждения", level=1)
@@ -242,9 +325,9 @@ def write_pdf(report: ReportData, path: Path) -> Path:
         if hasattr(item, "fontName"):
             item.fontName = "DejaVu"
     styles.add(ParagraphStyle(name="RuTitle", parent=styles["Title"], fontName="DejaVu",
-                              fontSize=20, leading=24, alignment=TA_CENTER, spaceAfter=10))
+                              fontSize=24, leading=28, alignment=TA_CENTER, spaceAfter=10))
     styles.add(ParagraphStyle(name="RuHeading", parent=styles["Heading1"], fontName="DejaVu",
-                              fontSize=14, leading=17, spaceBefore=12, spaceAfter=6))
+                              fontSize=16, leading=20, spaceBefore=12, spaceAfter=6))
     styles.add(ParagraphStyle(name="RuBody", parent=styles["BodyText"], fontName="DejaVu",
                               fontSize=9, leading=12))
     styles.add(ParagraphStyle(name="RuCell", parent=styles["BodyText"], fontName="DejaVu",
@@ -268,10 +351,10 @@ def write_pdf(report: ReportData, path: Path) -> Path:
         styles["RuBody"]))
     story.append(Spacer(1, 12))
 
-    def make_table(frame: pd.DataFrame) -> Table:
+    def make_table(frame: pd.DataFrame, numeric: set[int] | None = None) -> Table:
         data = [list(frame.columns)] + frame.astype(str).values.tolist()
         table = Table(data, repeatRows=1, hAlign="LEFT")
-        table.setStyle(TableStyle([
+        rules = [
             ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f3f4f6")),
             ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#374151")),
             ("FONTNAME", (0, 0), (-1, -1), "DejaVu"),
@@ -282,14 +365,17 @@ def write_pdf(report: ReportData, path: Path) -> Path:
             ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f9fafb")]),
             ("TOPPADDING", (0, 0), (-1, -1), 3),
             ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-        ]))
+        ]
+        # Числа — по правому краю, как требует design-guide.
+        rules += [("ALIGN", (position, 1), (position, -1), "RIGHT") for position in sorted(numeric or ())]
+        table.setStyle(TableStyle(rules))
         return table
 
     if report.headline:
         story.append(Paragraph("Ключевые показатели", styles["RuHeading"]))
         frame = pd.DataFrame(report.headline)[["label", "value", "unit", "source"]]
         frame.columns = ["Показатель", "Значение", "Ед.", "Источник"]
-        story.append(make_table(frame))
+        story.append(make_table(frame, {1}))
         story.append(Spacer(1, 8))
 
     if report.notes:
@@ -309,7 +395,7 @@ def write_pdf(report: ReportData, path: Path) -> Path:
         if frame is None or frame.empty:
             story.append(Paragraph("Нет данных для этого раздела.", styles["RuBody"]))
             continue
-        story.append(make_table(_table_for_output(frame)))
+        story.append(make_table(_table_for_output(frame), _numeric_positions(frame)))
 
     if report.warnings:
         story.append(Paragraph("Ограничения и предупреждения", styles["RuHeading"]))
@@ -359,10 +445,17 @@ def write_xlsx(report: ReportData, path: Path) -> Path:
         row += 1
         for item in report.headline:
             sheet.cell(row=row, column=1, value=str(item.get("label", "")))
-            value = item.get("value")
-            cell = sheet.cell(row=row, column=2, value=value if isinstance(value, (int, float)) else str(value))
-            if isinstance(value, (int, float)):
-                cell.number_format = "# ##0.##"
+            raw = item.get("raw")
+            value = raw if raw is not None else item.get("value")
+            cell = sheet.cell(row=row, column=2, value=value)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                digits = max(int(item.get("digits", 2)), 0)
+                if isinstance(value, float):
+                    cell.number_format = "# ##0" + ("." + "0" * digits if digits else "")
+                else:
+                    cell.number_format = "# ##0"
+            else:
+                cell.value = str(value)
             sheet.cell(row=row, column=3, value=str(item.get("unit", "")))
             sheet.cell(row=row, column=4, value=str(item.get("source", "")))
             row += 1
@@ -378,7 +471,7 @@ def write_xlsx(report: ReportData, path: Path) -> Path:
         if note:
             ws.cell(row=2, column=1, value=note).font = Font(size=9, italic=True, color="6B7280")
         for j, column in enumerate(frame.columns, start=1):
-            cell = ws.cell(row=start, column=j, value=str(column))
+            cell = ws.cell(row=start, column=j, value=column_title(column))
             cell.font = Font(bold=True)
             cell.fill = PatternFill("solid", start_color="F3F4F6")
             cell.alignment = Alignment(vertical="center", wrap_text=True)
@@ -397,7 +490,7 @@ def write_xlsx(report: ReportData, path: Path) -> Path:
                 elif isinstance(value, int):
                     cell.number_format = "# ##0"
         for j, column in enumerate(frame.columns, start=1):
-            width = max(10, min(38, len(str(column)) + 4))
+            width = max(10, min(38, len(column_title(column)) + 4))
             ws.column_dimensions[get_column_letter(j)].width = width
         ws.freeze_panes = ws.cell(row=start + 1, column=1)
         ws.auto_filter.ref = f"A{start}:{get_column_letter(len(frame.columns))}{start + len(frame)}"
@@ -406,7 +499,7 @@ def write_xlsx(report: ReportData, path: Path) -> Path:
         ws = workbook.create_sheet("Контроль качества")
         view = report.quality
         for j, column in enumerate(view.columns, start=1):
-            cell = ws.cell(row=1, column=j, value=str(column))
+            cell = ws.cell(row=1, column=j, value=column_title(column))
             cell.font = Font(bold=True)
         for i, (_, source_row) in enumerate(view.iterrows(), start=2):
             for j, column in enumerate(view.columns, start=1):
@@ -423,6 +516,7 @@ def write_xlsx(report: ReportData, path: Path) -> Path:
 def write_pptx(report: ReportData, path: Path) -> Path:
     from pptx import Presentation
     from pptx.dml.color import RGBColor
+    from pptx.enum.text import PP_ALIGN
     from pptx.util import Inches, Pt
 
     presentation = Presentation()
@@ -448,7 +542,7 @@ def write_pptx(report: ReportData, path: Path) -> Path:
     layout = presentation.slide_layouts[6]
 
     slide = presentation.slides.add_slide(layout)
-    add_title(slide, report.title, size=34)
+    add_title(slide, report.title, size=28)
     if report.subtitle:
         box = slide.shapes.add_textbox(Inches(0.6), Inches(1.6), Inches(12.1), Inches(0.6))
         box.text_frame.text = report.subtitle
@@ -465,7 +559,7 @@ def write_pptx(report: ReportData, path: Path) -> Path:
     total = 1 + (1 if len(content_sections) + len(charts) > 4 else 0) + len(content_sections) + len(charts)
     if total > 4:
         slide = presentation.slides.add_slide(layout)
-        add_title(slide, "Содержание", size=28)
+        add_title(slide, "Содержание", size=22)
         box = slide.shapes.add_textbox(Inches(0.8), Inches(1.6), Inches(11), Inches(5))
         frame = box.text_frame
         frame.text = "\n".join([name for name, _ in content_sections]
@@ -476,14 +570,15 @@ def write_pptx(report: ReportData, path: Path) -> Path:
 
     for name, frame in content_sections:
         slide = presentation.slides.add_slide(layout)
-        add_title(slide, name, size=24)
+        add_title(slide, name, size=18)
         rows = min(len(frame) + 1, 14)
         columns = min(len(frame.columns), 8)
+        numeric = _numeric_positions(frame)
         shape = slide.shapes.add_table(rows, columns, Inches(0.6), Inches(1.4),
                                        Inches(12.1), Inches(0.4 + 0.32 * rows))
         table = shape.table
         for j, column in enumerate(frame.columns[:columns]):
-            table.cell(0, j).text = str(column)
+            table.cell(0, j).text = column_title(column)
             for paragraph in table.cell(0, j).text_frame.paragraphs:
                 paragraph.font.size = Pt(10)
                 paragraph.font.bold = True
@@ -492,11 +587,13 @@ def write_pptx(report: ReportData, path: Path) -> Path:
                 table.cell(i, j).text = _fmt_cell(source_row[column], column)
                 for paragraph in table.cell(i, j).text_frame.paragraphs:
                     paragraph.font.size = Pt(9)
+                    if j in numeric:
+                        paragraph.alignment = PP_ALIGN.RIGHT
         add_footer(slide, len(presentation.slides))
 
     for name, chart in charts:
         slide = presentation.slides.add_slide(layout)
-        add_title(slide, _chart_title(name), size=24)
+        add_title(slide, _chart_title(name), size=18)
         slide.shapes.add_picture(str(chart), Inches(0.8), Inches(1.4), width=Inches(11.7))
         add_footer(slide, len(presentation.slides))
 
@@ -594,7 +691,7 @@ ALLOWED_LATIN = {
     "churn", "retention", "tofu", "mofu", "bofu", "abc", "iqr", "mape", "mae",
     "rmse", "arima", "ets", "csv", "excel", "json", "pdf", "docx", "xlsx",
     "pptx", "rtf", "html", "python", "sql", "github", "mit", "api", "id",
-    "k-means", "z-score", "b2b", "b2c",
+    "k-means", "z-score", "b2b", "b2c", "p-value",
 }
 
 
@@ -632,10 +729,21 @@ def write_html(report: ReportData, path: Path) -> Path:
     import html as html_lib
 
     def table_html(frame: pd.DataFrame) -> str:
+        numeric = _numeric_positions(frame)
         view = _table_for_output(frame)
-        head = "".join(f"<th>{html_lib.escape(str(column))}</th>" for column in view.columns)
+
+        def cell_class(index: int) -> str:
+            return ' class="num"' if index in numeric else ""
+
+        head = "".join(
+            f"<th{cell_class(index)}>{html_lib.escape(str(column))}</th>"
+            for index, column in enumerate(view.columns)
+        )
         body = "".join(
-            "<tr>" + "".join(f"<td>{html_lib.escape(str(value))}</td>" for value in row) + "</tr>"
+            "<tr>" + "".join(
+                f"<td{cell_class(index)}>{html_lib.escape(str(value))}</td>"
+                for index, value in enumerate(row)
+            ) + "</tr>"
             for row in view.values
         )
         return f"<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"
@@ -688,6 +796,7 @@ def write_html(report: ReportData, path: Path) -> Path:
  table {{ width:100%; border-collapse:collapse; background:#fff; font-size:13px; }}
  th {{ text-align:left; background:#f3f4f6; padding:9px; border-bottom:1px solid #e5e7eb; }}
  td {{ padding:8px 9px; border-bottom:1px solid #eef1f4; }}
+ td.num, th.num {{ text-align:right; font-variant-numeric:tabular-nums; }}
  tr:hover td {{ background:#f9fafb; }}
  img {{ max-width:100%; height:auto; background:#fff; border:1px solid #e5e7eb; border-radius:8px; }}
  ul {{ background:#fff; border:1px solid #e5e7eb; border-radius:8px; padding:14px 14px 14px 30px; }}
@@ -724,8 +833,42 @@ def write_reports(report: ReportData, out_dir: Path, formats: list[str]) -> dict
     return created
 
 
+STATUS_TITLES = {"pass": "пройдено", "warn": "предупреждение", "fail": "ошибка"}
+
+CHECK_TITLES = {
+    "unknown_tables": "Нераспознанные таблицы",
+    "portfolio_pk_unique": "Уникальность account_id",
+    "portfolio_balance_non_negative": "Отрицательные остатки портфеля",
+    "portfolio_dpd_non_negative": "Отрицательная просрочка (dpd)",
+    "portfolio_fk_clients": "Связь портфеля с clients",
+    "portfolio_fk_products": "Связь портфеля с products",
+    "portfolio_dpd_bucket_consistent": "Согласованность dpd и par_bucket",
+    "clients_pk_unique": "Уникальность client_id",
+    "products_pk_unique": "Уникальность product_code",
+    "sales_pk_unique": "Уникальность application_id",
+    "sales_amount_non_negative": "Отрицательные суммы в заявках",
+    "finance_grain_unique": "Уникальность period + product_code",
+    "finance_periods_parsed": "Разбор периодов finance",
+    "macro_survey_rows": "Непустая выгрузка опросов",
+    "macro_survey_periods": "Разбор периодов macro_survey",
+    "macro_survey_values": "Числовые значения macro_survey",
+}
+
+
+def check_title(check_id: str) -> str:
+    """Понятная подпись проверки; служебный код остаётся отдельной колонкой."""
+    if check_id in CHECK_TITLES:
+        return CHECK_TITLES[check_id]
+    if check_id.endswith("_required_columns"):
+        return f"Обязательные колонки: {check_id[:-len('_required_columns')]}"
+    if check_id.endswith("_periods"):
+        return f"Разбор периодов: {check_id[:-len('_periods')]}"
+    return check_id
+
+
 def quality_frame(report: QualityReport) -> pd.DataFrame:
     return pd.DataFrame([
-        {"Проверка": check.check_id, "Статус": check.status, "Детали": check.detail}
+        {"Проверка": check_title(check.check_id), "Код": check.check_id,
+         "Статус": STATUS_TITLES.get(check.status, check.status), "Детали": check.detail}
         for check in report.checks
     ])

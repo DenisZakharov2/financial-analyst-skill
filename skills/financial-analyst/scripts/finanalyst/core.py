@@ -18,6 +18,13 @@ import pandas as pd
 # --------------------------------------------------------------------------
 
 TEXT_SUFFIXES = {".csv", ".xls", ".xlsx"}
+WORKBOOK_SUFFIXES = {".xls", ".xlsx"}
+
+KNOWN_TABLES = frozenset({
+    "clients", "products", "portfolio", "accounts", "sales", "applications",
+    "funnel_events", "transactions", "finance", "macro_deposits", "macro_loans",
+    "macro_profit", "macro_securities", "macro_survey",
+})
 
 
 def load_tables(data_dir: Path) -> dict[str, pd.DataFrame]:
@@ -129,6 +136,18 @@ def parse_period(value) -> tuple[pd.Timestamp | pd.NaT, str]:
     return pd.NaT, ""
 
 
+def canonical_period(value) -> str:
+    """Привести период к ``YYYY-MM``; неразобранное значение вернуть как есть.
+
+    Нужно, чтобы «2024-01», «01.2024» и «январь 2024» не расходились по разным
+    строкам одной и той же таблицы.
+    """
+    start, _ = parse_period(value)
+    if pd.isna(start):
+        return str(value)
+    return pd.Timestamp(start).strftime("%Y-%m")
+
+
 def normalize_periods(df: pd.DataFrame, column: str = "period") -> pd.DataFrame:
     """Добавить period_start и period_type, отсортировать по дате."""
     if column not in df.columns:
@@ -181,19 +200,43 @@ def _numeric(df: pd.DataFrame, column: str) -> pd.Series:
     return pd.to_numeric(df[column], errors="coerce") if column in df.columns else pd.Series(dtype=float)
 
 
+REQUIRED_COLUMNS = {
+    "portfolio": ("account_id", "client_id", "balance", "dpd"),
+    "clients": ("client_id",),
+    "products": ("product_code", "product_type"),
+    "sales": ("application_id", "client_id", "funnel_stage"),
+    "funnel_events": ("stage",),
+    "finance": ("period", "product_code"),
+}
+
+TABLE_ALIASES = {"portfolio": "accounts", "sales": "applications"}
+
+
 def validate_inputs(tables: dict[str, pd.DataFrame]) -> QualityReport:
     """Проверить входные таблицы до расчётов.
 
     Правило: fail останавливает расчёт в --strict, warn только логируется.
+    Если обязательной колонки нет, проверка невозможна: добавляется warn
+    ``<таблица>_required_columns``, чтобы пропуск не был тихим.
     """
     report = QualityReport()
 
-    known = {"clients", "products", "portfolio", "accounts", "sales", "applications",
-             "funnel_events", "transactions", "finance", "macro_deposits", "macro_loans",
-             "macro_profit", "macro_securities", "macro_survey"}
-    unknown = sorted(set(tables) - known)
+    unknown = sorted(set(tables) - KNOWN_TABLES)
     if unknown:
         report.add("unknown_tables", False, f"Нераспознанные таблицы: {', '.join(unknown)}", warn_only=True)
+
+    for name, columns in REQUIRED_COLUMNS.items():
+        table = tables.get(name)
+        if table is None:
+            alias = TABLE_ALIASES.get(name)
+            table = tables.get(alias) if alias else None
+        if table is None:
+            continue
+        missing = sorted(set(columns) - set(table.columns))
+        if missing:
+            report.add(f"{name}_required_columns", False,
+                       f"Нет колонок {', '.join(missing)}: часть проверок и разделов недоступна.",
+                       warn_only=True)
 
     portfolio = tables.get("portfolio")
     if portfolio is None:
@@ -261,7 +304,9 @@ def validate_inputs(tables: dict[str, pd.DataFrame]) -> QualityReport:
 
     if finance is not None:
         if {"period", "product_code"} <= set(finance.columns):
-            dup = int(finance.duplicated(subset=["period", "product_code"]).sum())
+            grain = finance[["period", "product_code"]].copy()
+            grain["period"] = grain["period"].map(canonical_period)
+            dup = int(grain.duplicated().sum())
             report.add("finance_grain_unique", dup == 0,
                        f"Дублей period+product_code: {dup}")
         if "product_code" in finance.columns:

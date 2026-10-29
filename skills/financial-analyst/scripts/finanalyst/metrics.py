@@ -9,8 +9,13 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from .core import canonical_period, parse_period
+
 STAGE_ORDER = ["лид", "обращение", "заявка", "одобрение", "договор", "активация"]
 STAGE_RANK = {stage: i + 1 for i, stage in enumerate(STAGE_ORDER)}
+
+# Сколько месяцев покрывает один период каждого типа.
+PERIOD_MONTHS = {"M": 1, "D": 1, "Q": 3, "Y": 12}
 
 
 class MetricError(ValueError):
@@ -21,6 +26,49 @@ def _num(df: pd.DataFrame, column: str, default: float = np.nan) -> pd.Series:
     if column in df.columns:
         return pd.to_numeric(df[column], errors="coerce")
     return pd.Series(default, index=df.index, dtype="float64")
+
+
+def _months_in_periods(values: pd.Series) -> int:
+    """Сколько календарных месяцев покрывает набор периодов.
+
+    Месяц учитывается один раз, квартал — как три месяца, год — как двенадцать.
+    Так ARPU и NIM делят поток на длительность выгрузки, а не на число строк,
+    и «2024-01», «01.2024», «январь 2024», «1к2024» дают одинаковый результат.
+    """
+    spans: dict[pd.Period, int] = {}
+    for value in values:
+        start, kind = parse_period(value)
+        if pd.isna(start):
+            continue
+        month = pd.Timestamp(start).to_period("M")
+        spans[month] = max(spans.get(month, 1), PERIOD_MONTHS.get(kind, 1))
+    return int(sum(spans.values()))
+
+
+def _new_clients(clients: pd.DataFrame | None, finance: pd.DataFrame) -> int | None:
+    """Новые клиенты за период выгрузки — знаменатель CAC.
+
+    Нужна дата регистрации: без неё отличить нового клиента от активного
+    невозможно, и вызывающий код честно откатывается на активных клиентов.
+    """
+    if clients is None or "client_id" not in clients.columns or "period" not in finance.columns:
+        return None
+    date_column = next((column for column in ("registration_date", "signup_date", "first_product_date")
+                        if column in clients.columns), None)
+    if date_column is None:
+        return None
+    dates = pd.to_datetime(clients[date_column], errors="coerce")
+    if dates.notna().sum() == 0:
+        return None
+    starts = [start for start in (parse_period(value)[0] for value in finance["period"])
+              if pd.notna(start)]
+    if not starts:
+        return None
+    begin = min(starts)
+    end = max(starts) + pd.DateOffset(months=1)
+    window = (dates >= begin) & (dates < end)
+    count = int(clients.loc[window, "client_id"].nunique())
+    return count or None
 
 
 def _normalize_stage(value: str) -> str:
@@ -134,7 +182,7 @@ def funnel_summary(events: pd.DataFrame, stage_column: str = "stage") -> dict:
 
     if "application_id" in df.columns:
         entity_col, entity_name = "application_id", "заявка"
-        assumption = "Этап заявки — максимальный достигнутый; progression восстанавливается по application_id."
+        assumption = "Этап заявки — максимальный достигнутый; прогрессия восстанавливается по application_id."
     elif "client_id" in df.columns:
         entity_col, entity_name = "client_id", "клиент"
         assumption = ("Нет application_id: этап считается максимальным достигнутым на клиента. "
@@ -181,6 +229,9 @@ def finance_summary(finance: pd.DataFrame, portfolio: pd.DataFrame | None = None
         raise MetricError("Таблица finance пуста")
 
     df = finance.copy()
+    if "period" in df.columns:
+        # «2024-01», «01.2024» и «январь 2024» — один и тот же период.
+        df["period"] = df["period"].map(canonical_period)
     for column in ("interest_income", "fee_income", "premium", "funding_cost",
                    "reserve_expense", "opex", "tax", "marketing_cost"):
         if column in df.columns:
@@ -220,11 +271,17 @@ def finance_summary(finance: pd.DataFrame, portfolio: pd.DataFrame | None = None
     }
 
     if portfolio is not None and "balance" in portfolio.columns:
-        avg_assets = float(pd.to_numeric(portfolio["balance"], errors="coerce").mean())
-        if avg_assets:
+        # Портфель — снимок на дату, поэтому средние активы приближены суммой
+        # остатков: среднее по строкам дало бы баланс одного счёта, а не банка.
+        avg_assets = float(pd.to_numeric(portfolio["balance"], errors="coerce").sum())
+        months = max(_months_in_periods(df["period"]), 1) if "period" in df.columns else 1
+        if avg_assets and months:
             interest = float(col("interest_income").sum())
             funding = float(col("funding_cost").sum())
-            totals["nim_pct"] = round((interest - funding) / avg_assets * 100, 4)
+            # NIM — годовая ставка: поток за месяцы выгрузки приводим к месяцу,
+            # затем к году, иначе 6 месяцев выручки делятся на остаток одного дня.
+            totals["nim_pct"] = round((interest - funding) / months / avg_assets * 100 * 12, 2)
+            totals["nim_months"] = months
     return {"rows": rows, "totals": totals}
 
 
@@ -255,20 +312,17 @@ def unit_economics(
         active_clients = int(sales["client_id"].nunique())
         client_source = "sales.client_id"
     else:
-        active_clients = 0
+        active_clients = None
         client_source = "нет данных"
 
     # ARPU — за месяц, а не за весь период: иначе LTV завышается в разы.
-    if "period" in finance.columns:
-        months = int(pd.to_datetime(finance["period"].astype(str), errors="coerce", format="mixed")
-                     .dt.to_period("M").nunique())
-    else:
-        months = 1
-    months = max(months, 1)
+    months = max(_months_in_periods(finance["period"]), 1) if "period" in finance.columns else 1
 
     arpu = revenue / active_clients / months if active_clients else None
     marketing = fin.get("marketing_cost")
-    cac = marketing / active_clients if marketing and active_clients else None
+    acquired = _new_clients(clients, finance)
+    cac_base = acquired or active_clients
+    cac = marketing / cac_base if marketing and cac_base else None
 
     lifetime = float(lifetime_months)
     ltv_gross = (arpu * margin_ratio * lifetime) if arpu else None
@@ -280,18 +334,36 @@ def unit_economics(
     assumptions = [
         f"Срок жизни клиента принят {lifetime:.0f} мес. (параметр lifetime_months).",
         f"ARPU — выручка за месяц на активного клиента; периодов в данных: {months}.",
-        f"Активные клиенты: {client_source}; CAC считается на активного клиента.",
+        f"Активные клиенты: {client_source}; ARPU считается на активного клиента.",
     ]
+    if cac is not None:
+        if acquired:
+            assumptions.append(
+                f"CAC = расходы на привлечение / новые клиенты за период ({acquired} чел. "
+                f"по дате регистрации)."
+            )
+        else:
+            assumptions.append(
+                "Нет даты регистрации клиентов: CAC считается на активного клиента — "
+                "это занижает CAC, если база растёт."
+            )
     if cac is None:
-        assumptions.append(
-            "Расходы на привлечение не найдены (нет колонки marketing_cost в finance): "
-            "CAC, LTV/CAC и окупаемость не рассчитываются."
-        )
+        if not marketing:
+            assumptions.append(
+                "Расходы на привлечение не найдены (нет колонки marketing_cost в finance): "
+                "CAC, LTV/CAC и окупаемость не рассчитываются."
+            )
+        else:
+            assumptions.append(
+                "Нет данных о клиентах (client_id в portfolio, clients или sales): "
+                "CAC, LTV/CAC и окупаемость не рассчитываются."
+            )
 
     return {
         "revenue": revenue,
         "months": months,
         "active_clients": active_clients,
+        "new_clients": acquired,
         "arpu": arpu,
         "margin_pct": margin_pct,
         "marketing_cost": marketing,
@@ -345,7 +417,8 @@ def _robust_z(values: pd.Series) -> pd.Series:
         if mad == 0:
             std = clean.std(ddof=0)
             if std == 0:
-                return pd.Series(0.0, index=values.index)
+                # Константный ряд: отклонений нет, но пропуски остаются пропусками.
+                return values.where(values.isna(), 0.0)
             return (values - clean.mean()) / std
         return 0.6745 * (values - median) / mad
     return (values - clean.mean()) / clean.std(ddof=0)
@@ -394,7 +467,8 @@ def macro_correlation(left: pd.DataFrame, right: pd.DataFrame,
     if np.std(x) == 0 or np.std(y) == 0:
         return {"n": n, "pearson": None, "spearman": None, "p_value": None}
     pearson = float(np.corrcoef(x, y)[0, 1])
-    spearman = float(pd.Series(x).corr(pd.Series(y), method="spearman"))
+    # Спирмен = Пирсон по рангам: scipy в зависимостях нет, метод pandas потребовал бы её.
+    spearman = float(pd.Series(x).rank().corr(pd.Series(y).rank()))
     return {
         "n": n,
         "pearson": round(pearson, 3),
@@ -432,6 +506,11 @@ def forecast_trend(series: pd.DataFrame, value_col: str = "value",
     future = [last_period + step * (i + 1) for i in range(horizon)]
     base = np.polyval([slope, intercept], np.arange(len(y), len(y) + horizon, dtype=float))
     delta = band * mae
+    assumption = ("Линейный тренд по истории; границы сценариев = базовая линия ± "
+                  f"{band:g} × MAE бэктеста. Это интервал ошибки модели, а не прогноз факторов.")
+    if delta <= 1e-9:
+        assumption += (" MAE бэктеста = 0: границы совпадают с базовой линией, "
+                       "история описывается линейным трендом без остатка.")
 
     return {
         "available": True,
@@ -446,8 +525,7 @@ def forecast_trend(series: pd.DataFrame, value_col: str = "value",
         "mape_pct": round(mape, 2) if mape is not None else None,
         "slope_per_period": round(float(slope), 4),
         "history_points": int(len(y)),
-        "assumption": ("Линейный тренд по истории; границы сценариев = базовая линия ± "
-                       f"{band:g} × MAE бэктеста. Это интервал ошибки модели, а не прогноз факторов."),
+        "assumption": assumption,
     }
 
 

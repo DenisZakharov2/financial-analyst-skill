@@ -141,3 +141,87 @@ def test_forecast_requires_six_points():
     series = pd.DataFrame({"period_start": pd.date_range("2024-01-01", periods=3, freq="MS"),
                            "value": [1.0, 2.0, 3.0]})
     assert forecast_trend(series)["available"] is False
+
+
+def test_forecast_with_perfect_fit_reports_zero_band():
+    dates = pd.date_range("2020-01-01", periods=10, freq="MS")
+    series = pd.DataFrame({"period_start": dates, "value": np.arange(1, 11, dtype=float)})
+    result = forecast_trend(series)
+    assert result["band_mae"] == 0
+    assert "MAE бэктеста = 0" in result["assumption"]
+
+
+@pytest.mark.parametrize("periods,months", [
+    (["2024-01", "2024-02"], 2),
+    (["01.2024", "02.2024"], 2),
+    (["январь 2024", "февраль 2024"], 2),
+    (["1к2024", "2к2024"], 6),
+    (["2023", "2024"], 24),
+])
+def test_unit_economics_counts_months_for_supported_periods(periods, months):
+    finance = pd.DataFrame({"period": periods, "interest_income": [100.0] * len(periods)})
+    portfolio = pd.DataFrame({"client_id": ["C1", "C2"], "balance": [10.0, 10.0]})
+    result = unit_economics(finance, portfolio=portfolio)
+    assert result["months"] == months
+    assert result["arpu"] == pytest.approx(200.0 / 2 / months)
+
+
+def test_finance_periods_are_canonical():
+    finance = pd.DataFrame({
+        "period": ["2024-01", "01.2024", "январь 2024"],
+        "product_code": ["P1", "P1", "P1"],
+        "interest_income": [10.0, 10.0, 10.0],
+    })
+    result = finance_summary(finance)
+    assert len(result["rows"]) == 1
+    assert result["rows"].iloc[0]["revenue"] == pytest.approx(30.0)
+
+
+def test_cac_uses_new_clients_when_registration_dates_exist():
+    finance = pd.DataFrame({
+        "period": ["2024-01", "2024-02"],
+        "interest_income": [100.0, 100.0],
+        "marketing_cost": [60.0, 60.0],
+    })
+    clients = pd.DataFrame({
+        "client_id": ["C1", "C2", "C3"],
+        "registration_date": ["2024-01-10", "2023-11-01", "2024-02-20"],
+    })
+    portfolio = pd.DataFrame({"client_id": ["C1", "C2"], "balance": [10.0, 10.0]})
+    result = unit_economics(finance, clients=clients, portfolio=portfolio)
+    assert result["new_clients"] == 2
+    assert result["cac"] == pytest.approx(60.0)   # 120 / 2 новых клиента
+    assert any("новые клиенты" in item for item in result["assumptions"])
+
+
+def test_cac_falls_back_to_active_clients_without_dates():
+    finance = pd.DataFrame({"period": ["2024-01"], "interest_income": [100.0],
+                            "marketing_cost": [40.0]})
+    clients = pd.DataFrame({"client_id": ["C1", "C2", "C3", "C4"]})
+    result = unit_economics(finance, clients=clients)
+    assert result["new_clients"] is None
+    assert result["cac"] == pytest.approx(10.0)   # 40 / 4 активных клиента
+    assert any("Нет даты регистрации" in item for item in result["assumptions"])
+
+
+def test_cac_without_client_base_returns_none():
+    finance = pd.DataFrame({"period": ["2024-01"], "interest_income": [100.0],
+                            "marketing_cost": [50.0]})
+    result = unit_economics(finance)
+    assert result["active_clients"] is None
+    assert result["cac"] is None
+    assert any("Нет данных о клиентах" in item for item in result["assumptions"])
+
+
+def test_nim_is_annualized_over_total_balance():
+    finance = pd.DataFrame({
+        "period": ["2024-01", "2024-02", "2024-03"],
+        "product_code": ["P1"] * 3,
+        "interest_income": [10.0, 10.0, 10.0],
+        "funding_cost": [4.0, 4.0, 4.0],
+    })
+    portfolio = pd.DataFrame({"client_id": ["C1", "C2"], "balance": [1000.0, 1000.0]})
+    totals = finance_summary(finance, portfolio)["totals"]
+    # (30 − 12) / 3 мес / 2000 × 100 × 12 месяцев
+    assert totals["nim_months"] == 3
+    assert totals["nim_pct"] == pytest.approx(3.6)

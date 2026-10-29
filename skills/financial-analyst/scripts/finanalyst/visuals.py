@@ -121,11 +121,11 @@ def chart_series(df: pd.DataFrame, value_col: str, period_col: str, path: Path,
 
     fig, ax = plt.subplots(figsize=(10, 4.5))
     ax.plot(data[period_col], data[value_col], color=PALETTE["neutral"],
-            linewidth=2.2, marker="o", markersize=3.5, label=label or None)
+            linewidth=2.5, marker="o", markersize=6, label=label or None)
     if len(data) >= 6:
         window = max(3, min(12, len(data) // 4))
         ax.plot(data[period_col], data[value_col].rolling(window, min_periods=1).mean(),
-                color=PALETTE["warning"], linewidth=1.6, linestyle="--",
+                color=PALETTE["warning"], linewidth=2.0, linestyle="--",
                 label=f"Скользящее среднее, {window} п.")
     ax.set_title(f"{title}{(' — ' + label) if label else ''}")
     ax.set_ylabel("Значение")
@@ -146,9 +146,12 @@ def chart_anomalies(anomalies: pd.DataFrame, path: Path, label: str = "") -> Pat
         _empty(path)
         return None
     data = anomalies.sort_values("_z")
+    labels = (data["period_start"].dt.strftime("%Y-%m-%d")
+              if pd.api.types.is_datetime64_any_dtype(data["period_start"])
+              else data["period_start"].astype(str))
     fig, ax = plt.subplots(figsize=(10, 4.5))
     colors = [PALETTE["negative"] if value > 0 else PALETTE["positive"] for value in data["_z"]]
-    ax.barh(data["period_start"].astype(str), data["_z"], color=colors, height=0.6)
+    ax.barh(labels, data["_z"], color=colors, height=0.6)
     ax.axvline(3, color=PALETTE["negative"], linestyle="--", linewidth=1)
     ax.axvline(-3, color=PALETTE["negative"], linestyle="--", linewidth=1)
     ax.set_xlabel("Робастный Z-score")
@@ -298,20 +301,33 @@ function fmt(value) {
 
 function init() {
   const select = document.getElementById("industry");
+  const slider = document.getElementById("window");
+  const chartId = "chart-dynamics";
+  const maxWindow = DATA.periods.length;
+  if (!maxWindow || !DATA.industries.length) {
+    document.getElementById("loading").textContent = "Нет данных для отображения";
+    return;
+  }
+
   DATA.industries.forEach(name => {
     const option = document.createElement("option");
     option.value = name; option.textContent = name;
     select.appendChild(option);
   });
 
-  const slider = document.getElementById("window");
-  const maxWindow = DATA.periods.length;
   const startWindow = Math.min(24, maxWindow);
+  slider.min = Math.min(3, maxWindow);
   slider.max = maxWindow;
   slider.value = startWindow;
   document.getElementById("window-value").textContent = startWindow;
   document.getElementById("period-range").textContent =
     DATA.periods[0] + " — " + DATA.periods[DATA.periods.length - 1];
+
+  function xRange() {
+    const size = Number(slider.value);
+    const start = Math.max(0, DATA.periods.length - size);
+    return [DATA.periods[start], DATA.periods[DATA.periods.length - 1]];
+  }
 
   const traces = DATA.industries.map((name, index) => ({
     x: DATA.periods,
@@ -320,8 +336,8 @@ function init() {
     mode: "lines+markers",
     name: name,
     visible: index === 0,
-    line: {width: 2.2},
-    marker: {size: 4},
+    line: {width: 2.5},
+    marker: {size: 6},
     hovertemplate: "%{x}<br>" + name + ": %{y:.2f}<extra></extra>"
   }));
 
@@ -332,26 +348,38 @@ function init() {
     paper_bgcolor: "rgba(0,0,0,0)",
     plot_bgcolor: "rgba(0,0,0,0)",
     font: {family: "Segoe UI, Roboto, Arial, sans-serif", size: 12, color: "#374151"},
-    xaxis: {range: [DATA.periods[Math.max(0, DATA.periods.length - Math.min(24, DATA.periods.length))], DATA.periods[DATA.periods.length - 1]], gridcolor: "#eef1f4"},
+    xaxis: {range: xRange(), gridcolor: "#eef1f4"},
     yaxis: {gridcolor: "#eef1f4", zerolinecolor: "#d1d5db"},
     legend: {orientation: "h", y: -0.25}
   };
 
-  Plotly.newPlot("chart-dynamics", traces, layout, {displayModeBar: false, responsive: true});
+  const graphDiv = document.getElementById(chartId);
+  Plotly.newPlot(chartId, traces, layout, {displayModeBar: false, responsive: true})
+    .then(() => graphDiv.on("plotly_restyle", syncFromLegend));
 
   function applyWindow() {
     const size = Number(slider.value);
     document.getElementById("window-value").textContent = size;
-    const start = Math.max(0, DATA.periods.length - size);
-    Plotly.relayout("chart-dynamics", {
-      "xaxis.range": [DATA.periods[start], DATA.periods[DATA.periods.length - 1]]
-    });
+    Plotly.relayout(chartId, {"xaxis.range": xRange()});
   }
   slider.addEventListener("input", applyWindow);
 
+  // Легенда и список отраслей не должны расходиться: если после клика по легенде
+  // видимой осталась одна серия, переключаем фильтр и Z-score на неё.
+  function syncFromLegend() {
+    const graph = document.getElementById(chartId);
+    const visible = (graph.data || [])
+      .map((trace, index) => (trace.visible === true ? index : -1))
+      .filter(index => index >= 0);
+    if (visible.length !== 1) return;
+    const name = DATA.industries[visible[0]];
+    if (!name || name === select.value) return;
+    select.value = name;
+    renderZScore(name);
+  }
   select.addEventListener("change", () => {
     const index = DATA.industries.indexOf(select.value);
-    Plotly.restyle("chart-dynamics", {visible: DATA.industries.map((_, i) => i === index)});
+    Plotly.restyle(chartId, {visible: DATA.industries.map((_, i) => i === index)});
     renderZScore(select.value);
   });
 
