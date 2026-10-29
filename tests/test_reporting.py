@@ -1,6 +1,6 @@
 import pandas as pd
 import pytest
-from finanalyst.reporting import ReportData, lint_text, write_html, write_reports
+from finanalyst.reporting import ReportData, lint_text, quality_frame, write_html, write_reports
 from finanalyst.visuals import chart_funnel, setup_matplotlib
 
 
@@ -85,6 +85,22 @@ def test_html_has_tables_and_images(report, tmp_path):
     assert "<table>" in text
     assert "data:image/png;base64" in text
     assert "@media" in text
+    assert 'class="num"' in text
+
+
+def test_quality_frame_has_russian_titles_and_codes():
+    from finanalyst.core import QualityReport
+
+    quality = QualityReport()
+    quality.add("portfolio_pk_unique", True, "Дубли account_id: 0")
+    quality.add("finance_required_columns", False, "Нет колонок product_code", warn_only=True)
+    frame = quality_frame(quality)
+    assert list(frame.columns) == ["Проверка", "Код", "Статус", "Детали"]
+    assert frame.iloc[0]["Проверка"] == "Уникальность account_id"
+    assert frame.iloc[0]["Статус"] == "пройдено"
+    assert frame.iloc[1]["Проверка"] == "Обязательные колонки: finance"
+    assert frame.iloc[1]["Код"] == "finance_required_columns"
+    assert frame.iloc[1]["Статус"] == "предупреждение"
 
 
 def test_lint_text_catches_problems():

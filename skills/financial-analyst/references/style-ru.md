@@ -20,7 +20,7 @@
 NPL, DPD, ECL, KPI, YoY, QoQ, MoM, TAT, CAGR, ROI, ROMI, COGS, churn,
 retention, TOFU, MOFU, BOFU, ABC, IQR, MAPE, MAE, RMSE, ARIMA, ETS, CSV,
 Excel, JSON, PDF, DOCX, XLSX, PPTX, RTF, HTML, Python, SQL, API, ID, K-means,
-Z-score, B2B, B2C, GitHub, MIT.
+Z-score, B2B, B2C, GitHub, MIT, p-value.
 
 Всё остальное — по-русски или с расшифровкой в скобках при первом упоминании.
 

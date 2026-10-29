@@ -143,6 +143,14 @@ def test_forecast_requires_six_points():
     assert forecast_trend(series)["available"] is False
 
 
+def test_forecast_with_perfect_fit_reports_zero_band():
+    dates = pd.date_range("2020-01-01", periods=10, freq="MS")
+    series = pd.DataFrame({"period_start": dates, "value": np.arange(1, 11, dtype=float)})
+    result = forecast_trend(series)
+    assert result["band_mae"] == 0
+    assert "MAE бэктеста = 0" in result["assumption"]
+
+
 @pytest.mark.parametrize("periods,months", [
     (["2024-01", "2024-02"], 2),
     (["01.2024", "02.2024"], 2),

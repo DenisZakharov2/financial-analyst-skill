@@ -1,7 +1,12 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "financial-analyst-skill"
 version = "1.0.1"
 description = "Financial analyst skill for Hermes Agent: portfolio, funnel, unit economics, forecasting"
+readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [{name = "Denis Zakharov"}]
@@ -17,8 +22,15 @@ dependencies = [
     "xlrd>=2.0",
 ]
 
+[project.scripts]
+financial-analyst = "finanalyst.cli:main"
+
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.6", "pypdf>=4.0"]
+
+[tool.setuptools]
+package-dir = {"" = "skills/financial-analyst/scripts"}
+packages = ["finanalyst", "finanalyst.adapters"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

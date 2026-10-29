@@ -467,7 +467,8 @@ def macro_correlation(left: pd.DataFrame, right: pd.DataFrame,
     if np.std(x) == 0 or np.std(y) == 0:
         return {"n": n, "pearson": None, "spearman": None, "p_value": None}
     pearson = float(np.corrcoef(x, y)[0, 1])
-    spearman = float(pd.Series(x).corr(pd.Series(y), method="spearman"))
+    # Спирмен = Пирсон по рангам: scipy в зависимостях нет, метод pandas потребовал бы её.
+    spearman = float(pd.Series(x).rank().corr(pd.Series(y).rank()))
     return {
         "n": n,
         "pearson": round(pearson, 3),
@@ -505,6 +506,11 @@ def forecast_trend(series: pd.DataFrame, value_col: str = "value",
     future = [last_period + step * (i + 1) for i in range(horizon)]
     base = np.polyval([slope, intercept], np.arange(len(y), len(y) + horizon, dtype=float))
     delta = band * mae
+    assumption = ("Линейный тренд по истории; границы сценариев = базовая линия ± "
+                  f"{band:g} × MAE бэктеста. Это интервал ошибки модели, а не прогноз факторов.")
+    if delta <= 1e-9:
+        assumption += (" MAE бэктеста = 0: границы совпадают с базовой линией, "
+                       "история описывается линейным трендом без остатка.")
 
     return {
         "available": True,
@@ -519,8 +525,7 @@ def forecast_trend(series: pd.DataFrame, value_col: str = "value",
         "mape_pct": round(mape, 2) if mape is not None else None,
         "slope_per_period": round(float(slope), 4),
         "history_points": int(len(y)),
-        "assumption": ("Линейный тренд по истории; границы сценариев = базовая линия ± "
-                       f"{band:g} × MAE бэктеста. Это интервал ошибки модели, а не прогноз факторов."),
+        "assumption": assumption,
     }
 
 

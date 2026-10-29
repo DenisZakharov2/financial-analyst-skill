@@ -1,6 +1,7 @@
 import json
 
 import pandas as pd
+import pytest
 from finanalyst.cli import main
 
 
@@ -134,6 +135,35 @@ def test_cbr_adapter_accepts_any_workbook_name(tmp_path):
     rows = [["Период", "Индикатор бизнес-климата"]]
     for index, date in enumerate(pd.date_range("2023-01-01", periods=8, freq="MS")):
         rows.append([date.strftime("%Y-%m"), 1.0 + index])
+    pd.DataFrame(rows).to_excel(data / "opros.xlsx", sheet_name="Экономика всего",
+                                header=False, index=False)
+    out = tmp_path / "out"
+    assert main(["--data-dir", str(data), "--out", str(out), "--format", "xlsx",
+                 "--adapter", "cbr", "--quiet"]) == 0
+    metrics = json.loads((out / "metrics.json").read_text(encoding="utf-8"))
+    assert metrics["sections"]["macro"]["indicator"] == "Индикатор бизнес-климата"
+
+
+def test_macro_survey_correlations(tmp_path):
+    data = tmp_path / "survey"
+    data.mkdir()
+    rows = []
+    for index, date in enumerate(pd.date_range("2023-01-01", periods=10, freq="MS")):
+        for industry in ("Экономика всего", "Обрабатывающие производства"):
+            rows.append({"period": date.strftime("%Y-%m"), "industry": industry,
+                         "indicator": "Индикатор бизнес-климата", "value": 1.0 + 0.1 * index})
+            rows.append({"period": date.strftime("%Y-%m"), "industry": industry,
+                         "indicator": "Оценка спроса", "value": 2.0 + 0.2 * index})
+    pd.DataFrame(rows).to_csv(data / "macro_survey.csv", index=False)
+    out = tmp_path / "out"
+    assert main(["--data-dir", str(data), "--out", str(out), "--format", "docx",
+                 "--quiet"]) == 0
+    metrics = json.loads((out / "metrics.json").read_text(encoding="utf-8"))
+    correlations = metrics["sections"]["correlations"]
+    assert correlations["tested"] == 1
+    assert correlations["pairs"][0]["pearson"] == pytest.approx(1.0)
+    assert (out / "charts" / "correlation.png").exists()
+    assert any("причинность" in item for item in metrics["assumptions"])
     pd.DataFrame(rows).to_excel(data / "opros.xlsx", sheet_name="Экономика всего",
                                 header=False, index=False)
     out = tmp_path / "out"

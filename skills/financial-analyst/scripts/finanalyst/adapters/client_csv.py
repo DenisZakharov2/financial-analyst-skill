@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pandas as pd
 
-from ..core import REQUIRED_COLUMNS, TEXT_SUFFIXES
+from ..core import REQUIRED_COLUMNS
 
 ALIASES = {
     "accounts": "portfolio",
@@ -37,8 +35,3 @@ def normalize(tables: dict[str, pd.DataFrame]) -> tuple[dict[str, pd.DataFrame],
         if missing:
             notes.append(f"{table}: нет колонок {', '.join(missing)} — раздел будет пропущен.")
     return result, notes
-
-
-def discover(data_dir: Path) -> list[str]:
-    return sorted(path.name for path in data_dir.iterdir()
-                  if path.suffix.lower() in TEXT_SUFFIXES)

@@ -32,6 +32,7 @@ from .metrics import (
     forecast_trend,
     funnel_summary,
     macro_anomalies,
+    macro_correlation,
     macro_dynamics,
     macro_structure,
     portfolio_summary,
@@ -41,6 +42,7 @@ from .reporting import ReportData, fmt_num, quality_frame, write_html, write_rep
 from .visuals import (
     build_dashboard,
     chart_anomalies,
+    chart_correlation,
     chart_forecast,
     chart_funnel,
     chart_portfolio,
@@ -179,6 +181,40 @@ def _pick_industry(survey: pd.DataFrame, indicator: str) -> str:
             return preferred
     counts = subset.groupby("industry")["value"].count().sort_values(ascending=False)
     return str(counts.index[0])
+
+
+def _correlations(survey: pd.DataFrame, industry: str, max_indicators: int = 8,
+                  top_n: int = 10) -> dict:
+    """Попарные корреляции показателей одной отрасли и матрица для графика.
+
+    Ограничение ``max_indicators`` держит перестановочный тест (2000 итераций
+    на пару) в разумном времени: восемь показателей — это 28 пар.
+    """
+    subset = survey[survey["industry"] == industry]
+    wide = (subset.pivot_table(index="period_start", columns="indicator", values="value",
+                               aggfunc="first").sort_index())
+    if wide.shape[1] < 2:
+        return {"pairs": pd.DataFrame(), "matrix": pd.DataFrame(), "tested": 0}
+    coverage = wide.notna().sum().sort_values(ascending=False)
+    names = list(coverage.index[:max_indicators])
+    pairs = []
+    for position, left_name in enumerate(names):
+        for right_name in names[position + 1:]:
+            left = wide[[left_name]].rename(columns={left_name: "_left"}).reset_index()
+            right = wide[[right_name]].rename(columns={right_name: "_right"}).reset_index()
+            result = macro_correlation(left, right, "_left", "_right")
+            if result["pearson"] is None:
+                continue
+            pairs.append({"indicator_1": str(left_name), "indicator_2": str(right_name),
+                          "n": result["n"], "pearson": result["pearson"],
+                          "spearman": result["spearman"], "p_value": result["p_value"]})
+    if not pairs:
+        return {"pairs": pd.DataFrame(), "matrix": pd.DataFrame(), "tested": 0}
+    frame = pd.DataFrame(pairs)
+    frame = (frame.reindex(frame["pearson"].abs().sort_values(ascending=False).index)
+                  .head(top_n).reset_index(drop=True))
+    matrix = wide[names].corr(method="pearson").round(3)
+    return {"pairs": frame, "matrix": matrix, "tested": len(pairs)}
 
 
 # --------------------------------------------------------------------------
@@ -404,7 +440,8 @@ def run(args: argparse.Namespace) -> int:
         if forecast.get("available"):
             assumptions.append(forecast["assumption"])
             frame = pd.DataFrame({
-                "Период": forecast["periods"],
+                "Период": [period[:7] if period.endswith("-01") else period
+                           for period in forecast["periods"]],
                 **{name: values for name, values in forecast["scenarios"].items()},
             })
             sections.append(("Прогноз: значения", frame,
@@ -412,6 +449,26 @@ def run(args: argparse.Namespace) -> int:
             chart = chart_forecast(forecast, charts_dir / "forecast.png")
             if chart:
                 charts["Прогноз по сценариям"] = chart
+
+        # Корреляции показателей внутри отрасли: перестановочный p-value не даёт
+        # принять случайную связь за вывод, число проверенных пар фиксируется.
+        correlation = _correlations(survey, industry)
+        if not correlation["pairs"].empty:
+            note = "Корреляция не означает причинность: это связь, а не механизм."
+            sections.append(("Макро: корреляции показателей", correlation["pairs"], note))
+            assumptions.append(
+                f"{note} Проверено пар: {correlation['tested']}; "
+                f"показаны {len(correlation['pairs'])} с наибольшим |r|; "
+                "в матрицу вошло не более 8 показателей по покрытию."
+            )
+            metrics_payload["sections"]["correlations"] = {
+                "industry": industry,
+                "tested": int(correlation["tested"]),
+                "pairs": records(correlation["pairs"]),
+            }
+            chart = chart_correlation(correlation["matrix"], charts_dir / "correlation.png")
+            if chart:
+                charts["Корреляционная матрица"] = chart
 
         if "html" in formats:
             build_dashboard(survey, indicator, out_dir / "dashboard.html",
