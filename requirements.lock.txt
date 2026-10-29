@@ -1,0 +1,11 @@
+# Проверенный набор версий (Python 3.12, 2026-10-28).
+# Установка: pip install -r requirements.lock.txt
+pandas==3.1.0
+numpy==2.5.4
+matplotlib==3.11.2
+plotly==7.1.0
+python-docx==1.2.0
+python-pptx==1.0.2
+openpyxl==3.1.5
+reportlab==5.1.0
+xlrd==2.0.2

@@ -1,10 +1,11 @@
 ---
 name: financial-analyst
-description: "Финансовая аналитика: портфель, воронка, прогноз."
+description: "Анализ портфеля, воронки, юнит-экономики и прогноза."
 version: 1.0.1
 author: Denis Zakharov (@DenisZakharov2), Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
+allowed-tools: Read Write Bash
 metadata:
   hermes:
     tags: [finance, banking, fintech, portfolio, funnel, forecasting, unit-economics]
@@ -37,9 +38,12 @@ metadata:
 
 ## Prerequisites
 
-- Python 3.10+ (проверено на 3.12) и зависимости из `requirements.txt` в корне
-  репозитория: `pip install -r requirements.txt`. Пакетная установка
-  `pip install -e .` дополнительно даёт команду `financial-analyst`.
+- Python 3.10+ (проверено на 3.12) и зависимости из `requirements.txt` с
+  диапазонами версий; точный проверенный набор — `requirements.lock.txt`:
+  `pip install -r requirements.lock.txt`. Пакетная установка `pip install -e .`
+  дополнительно даёт команду `financial-analyst`.
+- Запускайте с `PYTHONDONTWRITEBYTECODE=1`: иначе в `scripts/` появится
+  `__pycache__`, и сканеры безопасности пометят скилл как непрозрачный.
 - Шрифт с кириллицей для PDF: берётся из matplotlib, отдельная установка не нужна.
   Если matplotlib недоступен, положите `DejaVuSans.ttf` в `assets/fonts/`.
 - Сеть не требуется: Plotly встраивается в дашборд, внешних CDN нет.
@@ -122,7 +126,7 @@ CSV, XLS, XLSX. Широкие листы Excel разбираются адап�
 ## Проверка результата
 
 ```bash
-python scripts/analyze.py --data-dir assets/sample --out /tmp/fa --strict
+PYTHONDONTWRITEBYTECODE=1 python scripts/analyze.py --data-dir assets/sample --out /tmp/fa --strict
 python scripts/check_skill.py
 ```
 
