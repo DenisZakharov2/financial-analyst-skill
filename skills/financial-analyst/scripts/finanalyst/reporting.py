@@ -198,6 +198,7 @@ def write_docx(report: ReportData, path: Path) -> Path:
     style = document.styles["Normal"]
     style.font.name = "Segoe UI"
     style.font.size = Pt(10)
+    document.styles["Heading 1"].font.size = Pt(16)
 
     title = document.add_heading(report.title, level=0)
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -326,7 +327,7 @@ def write_pdf(report: ReportData, path: Path) -> Path:
     styles.add(ParagraphStyle(name="RuTitle", parent=styles["Title"], fontName="DejaVu",
                               fontSize=24, leading=28, alignment=TA_CENTER, spaceAfter=10))
     styles.add(ParagraphStyle(name="RuHeading", parent=styles["Heading1"], fontName="DejaVu",
-                              fontSize=14, leading=17, spaceBefore=12, spaceAfter=6))
+                              fontSize=16, leading=20, spaceBefore=12, spaceAfter=6))
     styles.add(ParagraphStyle(name="RuBody", parent=styles["BodyText"], fontName="DejaVu",
                               fontSize=9, leading=12))
     styles.add(ParagraphStyle(name="RuCell", parent=styles["BodyText"], fontName="DejaVu",
