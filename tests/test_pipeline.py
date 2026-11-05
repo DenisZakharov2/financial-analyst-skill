@@ -236,3 +236,36 @@ def test_total_rows_are_excluded_and_reported(tmp_path):
     assert metrics["sections"]["portfolio"]["totals"]["excluded_total_rows"] == 1
     assert any("product_code=ALL" in item for item in metrics["warnings"])
 
+
+
+def test_metrics_csv_contains_headline_and_unit_economics(sample_dir, tmp_path):
+    """Шаг «сверьте headline с metrics.csv» должен быть выполним."""
+    assert main(["--data-dir", str(sample_dir), "--out", str(tmp_path),
+                 "--format", "xlsx", "--quiet"]) == 0
+    frame = pd.read_csv(tmp_path / "metrics.csv", encoding="utf-8-sig")
+    assert list(frame.columns) == ["section", "metric", "dimension", "value"]
+    metrics = json.loads((tmp_path / "metrics.json").read_text(encoding="utf-8"))
+
+    headline = frame[frame["section"] == "Ключевые показатели"]
+    assert "PAR 30" in set(headline["metric"])
+    par = headline[headline["metric"] == "PAR 30"]["value"].iloc[0]
+    assert par == pytest.approx(metrics["sections"]["portfolio"]["totals"]["par30_pct"])
+
+    unit = frame[frame["section"] == "Юнит-экономика"]
+    assert {"arpu", "cac", "ltv_cac", "payback_months"} <= set(unit["metric"])
+    ltv_cac = unit[unit["metric"] == "ltv_cac"]["value"].iloc[0]
+    assert ltv_cac == pytest.approx(metrics["sections"]["unit_economics"]["ltv_cac"])
+
+
+def test_metrics_csv_has_header_for_empty_run(tmp_path):
+    """Даже без разделов у metrics.csv есть заголовок: файл читается pandas."""
+    data = tmp_path / "empty"
+    data.mkdir()
+    pd.DataFrame({"period": ["2024-01"], "product_code": ["ALL"],
+                  "interest_income": [1.0]}).to_csv(data / "finance.csv", index=False)
+    out = tmp_path / "out"
+    assert main(["--data-dir", str(data), "--out", str(out), "--format", "xlsx",
+                 "--quiet"]) == 0
+    frame = pd.read_csv(out / "metrics.csv", encoding="utf-8-sig")
+    assert list(frame.columns) == ["section", "metric", "dimension", "value"]
+

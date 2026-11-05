@@ -178,7 +178,8 @@ def test_finance_periods_are_canonical():
     assert result["rows"].iloc[0]["revenue"] == pytest.approx(30.0)
 
 
-def test_cac_uses_new_clients_when_registration_dates_exist():
+def test_cac_uses_new_clients_with_account_in_portfolio():
+    """Знаменатель CAC — новые клиенты портфеля, а не все зарегистрированные."""
     finance = pd.DataFrame({
         "period": ["2024-01", "2024-02"],
         "interest_income": [100.0, 100.0],
@@ -190,9 +191,48 @@ def test_cac_uses_new_clients_when_registration_dates_exist():
     })
     portfolio = pd.DataFrame({"client_id": ["C1", "C2"], "balance": [10.0, 10.0]})
     result = unit_economics(finance, clients=clients, portfolio=portfolio)
+    # C3 зарегистрирован в окне, но счёта в портфеле нет: в базу CAC не входит,
+    # иначе CAC делится на клиентов, которых нет в ARPU.
+    assert result["new_clients"] == 1
+    assert result["active_clients"] == 2
+    assert result["cac_base"] == 1
+    assert result["cac"] == pytest.approx(120.0)
+    assert any("со счётом в портфеле" in item for item in result["assumptions"])
+
+
+def test_cac_counts_all_registered_clients_without_portfolio():
+    """Без портфеля база — все клиенты с датой регистрации (документированный фолбэк)."""
+    finance = pd.DataFrame({
+        "period": ["2024-01", "2024-02"],
+        "interest_income": [100.0, 100.0],
+        "marketing_cost": [60.0, 60.0],
+    })
+    clients = pd.DataFrame({
+        "client_id": ["C1", "C2", "C3"],
+        "registration_date": ["2024-01-10", "2023-11-01", "2024-02-20"],
+    })
+    result = unit_economics(finance, clients=clients)
     assert result["new_clients"] == 2
-    assert result["cac"] == pytest.approx(60.0)   # 120 / 2 новых клиента
-    assert any("новые клиенты" in item for item in result["assumptions"])
+    assert result["cac"] == pytest.approx(60.0)
+    assert any("по дате регистрации" in item for item in result["assumptions"])
+
+
+def test_cac_is_null_when_no_new_clients_in_window():
+    """Ноль новых клиентов — это не «нет данных»: подменять базу активными нельзя."""
+    finance = pd.DataFrame({
+        "period": ["2024-01"],
+        "interest_income": [100.0],
+        "marketing_cost": [40.0],
+    })
+    clients = pd.DataFrame({
+        "client_id": ["C1", "C2"],
+        "registration_date": ["2022-05-01", "2023-01-15"],
+    })
+    portfolio = pd.DataFrame({"client_id": ["C1", "C2"], "balance": [10.0, 10.0]})
+    result = unit_economics(finance, clients=clients, portfolio=portfolio)
+    assert result["new_clients"] == 0
+    assert result["cac"] is None
+    assert any("нет новых клиентов" in item for item in result["assumptions"])
 
 
 def test_cac_falls_back_to_active_clients_without_dates():
@@ -268,6 +308,21 @@ def test_portfolio_total_row_is_not_summed_with_detail():
     assert result["totals"]["excluded_total_rows"] == 1
 
 
+def test_accounts_in_rows_sum_to_total():
+    """Счета в разрезе и в итогах — один счётчик: сумма по продуктам равна итогу."""
+    portfolio = pd.DataFrame({
+        "account_id": ["A1", "A2", None],
+        "client_id": ["C1", "C2", "C3"],
+        "product_code": ["P1", "P1", "P2"],
+        "balance": [10.0, 20.0, 30.0],
+        "dpd": [0, 0, 0],
+    })
+    products = pd.DataFrame({"product_code": ["P1", "P2"], "product_type": ["карта", "кредит"]})
+    result = portfolio_summary(portfolio, products)
+    assert result["totals"]["accounts"] == 2                       # уникальные непустые account_id
+    assert int(result["rows"]["accounts"].sum()) == result["totals"]["accounts"]
+
+
 def test_change_pct_is_null_when_previous_is_zero():
     """Контракт change_pct: нулевая база → null, а не бесконечность в отчёте."""
     series = pd.DataFrame({
@@ -301,3 +356,27 @@ def test_yoy_is_skipped_for_daily_series():
         "value_mln_rub": [1.0] * 20,
     })
     assert "yoy_pct" not in macro_dynamics(series).columns
+
+
+def test_report_and_dashboard_share_the_same_anomaly_math(tmp_path):
+    """Одна реализация робастного Z: отчёт и дашборд не расходятся на одном ряду."""
+    import json
+    import re
+
+    from finanalyst.visuals import build_dashboard
+
+    # MAD = 0 (десять единиц и выброс) — раньше отчёт считал по σ, дашборд давал нули.
+    series = pd.DataFrame({
+        "period_start": pd.date_range("2024-01-01", periods=11, freq="MS"),
+        "value": [1.0] * 10 + [1000.0],
+    })
+    report = macro_anomalies(series, value_col="value", group_cols=())
+    path = tmp_path / "dashboard.html"
+    build_dashboard(series.assign(industry="X", indicator="I"), "I", path)
+    payload = json.loads(re.search(r"const DATA = (\{.*?\});\n",
+                                   path.read_text(encoding="utf-8"), re.S).group(1))
+
+    assert len(report) == 1
+    assert len(payload["anomalies"]) == 1
+    assert max(abs(value) for value in payload["zseries"]["X"]) == pytest.approx(
+        round(float(report["_z"].abs().max()), 3))
