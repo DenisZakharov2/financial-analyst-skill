@@ -165,6 +165,40 @@ def flatten_metrics(sections: list[tuple[str, pd.DataFrame, str]]) -> list[dict]
     return rows
 
 
+def headline_rows(headline: list[dict]) -> list[dict]:
+    """Ключевые показатели в плоском виде.
+
+    Без них шаг «сверьте headline с metrics.csv» невыполним: в отчёте число есть,
+    а в CSV его нет. Значение берётся из ``raw`` (число), а не из ``value``
+    (форматированная строка).
+    """
+    rows: list[dict] = []
+    for item in headline:
+        raw = item.get("raw")
+        if raw is None or (isinstance(raw, float) and np.isnan(raw)):
+            continue
+        rows.append({
+            "section": "Ключевые показатели",
+            "metric": str(item.get("label", "")),
+            "dimension": str(item.get("unit", "")),
+            "value": float(raw) if isinstance(raw, (float, np.floating)) else raw,
+        })
+    return rows
+
+
+def flat_values(section: str, values: dict) -> list[dict]:
+    """Числовые поля словаря метрик (юнит-экономика) в плоском виде."""
+    rows: list[dict] = []
+    for key, value in values.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float, np.integer, np.floating)):
+            continue
+        number = float(value)
+        if not np.isfinite(number):
+            continue
+        rows.append({"section": section, "metric": str(key), "dimension": "", "value": number})
+    return rows
+
+
 # --------------------------------------------------------------------------
 # Макро-раздел
 # --------------------------------------------------------------------------
@@ -301,6 +335,7 @@ def run(args: argparse.Namespace) -> int:
     assumptions: list[str] = []
     warnings: list[str] = list(quality.warnings)
     headline: list[dict] = []
+    unit: dict = {}
     charts: dict[str, Path] = {}
     metrics_payload: dict = {
         "meta": {
@@ -388,6 +423,8 @@ def run(args: argparse.Namespace) -> int:
         unit_frame = pd.DataFrame([
             {"Показатель": "Выручка", "Значение": fmt_num(unit["revenue"] / 1e6, 2), "Ед.": "млн руб."},
             {"Показатель": "Активные клиенты", "Значение": fmt_num(unit["active_clients"], 0), "Ед.": "чел."},
+            {"Показатель": "Новые клиенты за период", "Значение": fmt_num(unit["new_clients"], 0),
+             "Ед.": "чел."},
             {"Показатель": "ARPU (в месяц)", "Значение": fmt_num(unit["arpu"], 2), "Ед.": "руб./клиент"},
             {"Показатель": "CAC", "Значение": fmt_num(unit["cac"], 2), "Ед.": "руб./клиент"},
             {"Показатель": "LTV (gross)", "Значение": fmt_num(unit["ltv_gross"], 2), "Ед.": "руб."},
@@ -523,14 +560,19 @@ def run(args: argparse.Namespace) -> int:
         }
 
     # --- Плоские метрики --------------------------------------------------
+    # metrics.csv — плоский список чисел для сверки: разделы, ключевые
+    # показатели (raw, а не форматированная строка) и юнит-экономика.
     metric_rows = flatten_metrics(sections)
+    metric_rows += headline_rows(headline)
+    metric_rows += flat_values("Юнит-экономика", unit)
     metrics_payload["metrics"] = metric_rows
     metrics_payload["headline"] = headline
     metrics_payload["notes"] = notes
     (out_dir / "metrics.json").write_text(
         json.dumps(json_ready(metrics_payload), ensure_ascii=False, indent=2, allow_nan=False),
         encoding="utf-8")
-    pd.DataFrame(metric_rows).to_csv(out_dir / "metrics.csv", index=False, encoding="utf-8-sig")
+    pd.DataFrame(metric_rows, columns=["section", "metric", "dimension", "value"]).to_csv(
+        out_dir / "metrics.csv", index=False, encoding="utf-8-sig")
 
     # --- Отчёты -----------------------------------------------------------
     report = ReportData(

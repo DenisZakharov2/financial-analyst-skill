@@ -1,5 +1,9 @@
-# Проверенный набор версий (Python 3.12, 2026-10-28).
+# Проверенный набор версий (2026-11-05).
 # Установка: pip install -r requirements.lock.txt
+#
+# Только Python 3.12: pandas 3.1 и numpy 2.5 не имеют сборок для 3.10/3.11
+# (там pip завершится ошибкой «No matching distribution found»). На 3.10/3.11
+# используйте ranges из requirements.txt — они и проверяются в CI на обеих версиях.
 pandas==3.1.0
 numpy==2.5.4
 matplotlib==3.11.2

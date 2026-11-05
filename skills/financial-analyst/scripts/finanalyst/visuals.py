@@ -12,6 +12,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from .metrics import robust_z
+
 PALETTE = {
     "navy": "#1f2937",
     "slate": "#374151",
@@ -456,16 +458,9 @@ def build_dashboard(survey: pd.DataFrame, indicator: str, path: Path,
     anomalies = []
     for industry in industries:
         values = wide[industry]
-        clean = values.dropna()
-        if len(clean) < 3:
-            zseries[industry] = [None] * len(values)
-            continue
-        if len(clean) < 50:
-            median = clean.median()
-            mad = (clean - median).abs().median()
-            z = (0.6745 * (values - median) / mad) if mad else values * 0
-        else:
-            z = (values - clean.mean()) / clean.std(ddof=0)
+        # Та же функция, что в разделе аномалий: дашборд и отчёт не должны
+        # расходиться на одном и том же ряду.
+        z = robust_z(values)
         zseries[industry] = [None if pd.isna(v) else round(float(v), 3) for v in z]
         for period, value, score in zip(periods, values, z):
             if pd.notna(score) and abs(score) > 3:

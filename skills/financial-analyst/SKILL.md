@@ -1,7 +1,7 @@
 ---
 name: financial-analyst
 description: "Анализ портфеля, воронки, юнит-экономики и прогноза."
-version: 1.0.2
+version: 1.0.3
 author: Denis Zakharov (@DenisZakharov2), Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -39,8 +39,10 @@ metadata:
 ## Prerequisites
 
 - Python 3.10+ (проверено на 3.12) и зависимости из `requirements.txt` с
-  диапазонами версий; точный проверенный набор — `requirements.lock.txt`:
-  `pip install -r requirements.lock.txt`. Пакетная установка `pip install -e .`
+  диапазонами версий. Точный проверенный набор — `requirements.lock.txt`:
+  `pip install -r requirements.lock.txt`. Он собран под **Python 3.12**:
+  `pandas 3.1` и `numpy 2.5` не имеют сборок для 3.10/3.11, там ставьте
+  `requirements.txt`. Пакетная установка `pip install -e .`
   дополнительно даёт команду `financial-analyst`.
 - Запускайте с `PYTHONDONTWRITEBYTECODE=1`: иначе в `scripts/` появится
   `__pycache__`, и сканеры безопасности пометят скилл как непрозрачный.
@@ -60,7 +62,8 @@ metadata:
    *Критерий: у каждой метрики понятны зерно, знаменатель и краевой случай.*
 4. **Посчитать.** Скрипт пишет `metrics.json`, `metrics.csv`, графики и отчёты.
    *Критерий: `metrics.json` содержит разделы и допущения, код возврата 0.*
-5. **Сверить числа.** Сравните headline-показатели с `metrics.csv`.
+5. **Сверить числа.** Сравните headline-показатели с `metrics.csv`
+   (разделы «Ключевые показатели» и «Юнит-экономика»).
    *Критерий: каждое число в тексте есть в `metrics.json`.*
 6. **Написать выводы.** Используйте `templates/report.md.tmpl`.
    *Критерий: методология, допущения, интерпретация, риски, следующие шаги.*
@@ -83,7 +86,8 @@ CSV, XLS, XLSX. Широкие листы Excel разбираются адап�
 
 - `metrics.json` — разделы, допущения, предупреждения, контроль качества, headline
   (`value` — строка для отчёта, `raw` — то же число для XLSX и сверки).
-- `metrics.csv` — плоский список чисел для сверки и трассировки.
+- `metrics.csv` — плоский список чисел для сверки: разделы отчёта, ключевые
+  показатели и юнит-экономика (`section,metric,dimension,value`).
 - `charts/*.png` — графики, только если в данных есть что рисовать.
 - `financial_analyst_report.{docx,pdf,xlsx,pptx,rtf}` — отчёт с таблицами и графиками.
 - `report.html` — интерактивный дашборд (при рыночном ряде) или статический отчёт.

@@ -45,11 +45,16 @@ def _months_in_periods(values: pd.Series) -> int:
     return int(sum(spans.values()))
 
 
-def _new_clients(clients: pd.DataFrame | None, finance: pd.DataFrame) -> int | None:
+def _new_clients(clients: pd.DataFrame | None, finance: pd.DataFrame,
+                 portfolio: pd.DataFrame | None = None) -> int | None:
     """Новые клиенты за период выгрузки — знаменатель CAC.
 
     Нужна дата регистрации: без неё отличить нового клиента от активного
     невозможно, и вызывающий код честно откатывается на активных клиентов.
+    Если есть портфель, считаются только клиенты со счётом: иначе CAC делится
+    на всех зарегистрированных, ARPU — на активных, и метрики несопоставимы.
+    Возвращает число клиентов (0, если за период новых нет) или None, если
+    метрика не считается.
     """
     if clients is None or "client_id" not in clients.columns or "period" not in finance.columns:
         return None
@@ -67,8 +72,9 @@ def _new_clients(clients: pd.DataFrame | None, finance: pd.DataFrame) -> int | N
     begin = min(starts)
     end = max(starts) + pd.DateOffset(months=1)
     window = (dates >= begin) & (dates < end)
-    count = int(clients.loc[window, "client_id"].nunique())
-    return count or None
+    if portfolio is not None and "client_id" in portfolio.columns:
+        window &= clients["client_id"].isin(portfolio["client_id"].dropna())
+    return int(clients.loc[window, "client_id"].nunique())
 
 
 def _normalize_stage(value: str) -> str:
@@ -114,7 +120,9 @@ def portfolio_summary(
     id_col = "account_id" if "account_id" in df.columns else None
     grouped = df.groupby("product_type", dropna=False)
     rows = pd.DataFrame({
-        "accounts": grouped.size() if id_col is None else grouped[id_col].count(),
+        # accounts в разрезе и в итогах — один и тот же счётчик (уникальные счета),
+        # иначе сумма по продуктам не сходится с итогом.
+        "accounts": grouped.size() if id_col is None else grouped[id_col].nunique(),
         "clients": grouped["client_id"].nunique() if "client_id" in df.columns else np.nan,
         "total_balance": grouped["balance"].sum(min_count=1),
         "total_limit": grouped["limit_amount"].sum(min_count=1),
@@ -138,7 +146,7 @@ def portfolio_summary(
         concentration = np.nan
 
     totals = {
-        "accounts": int(len(df)),
+        "accounts": int(df[id_col].nunique()) if id_col else int(len(df)),
         "clients": int(df["client_id"].nunique()) if "client_id" in df.columns else None,
         "total_balance": float(df["balance"].sum(min_count=1)),
         "total_limit": float(df["limit_amount"].sum(min_count=1)) if df["limit_amount"].notna().any() else None,
@@ -327,8 +335,11 @@ def unit_economics(
 
     arpu = revenue / active_clients / months if active_clients else None
     marketing = fin.get("marketing_cost")
-    acquired = _new_clients(clients, finance)
-    cac_base = acquired or active_clients
+    portfolio_base = portfolio is not None and "client_id" in portfolio.columns
+    acquired = _new_clients(clients, finance, portfolio if portfolio_base else None)
+    # Знаменатель CAC — та же база, что у ARPU: клиент со счётом. Ноль новых
+    # клиентов не подменяется активными: это разные метрики.
+    cac_base = acquired if acquired is not None else active_clients
     cac = marketing / cac_base if marketing and cac_base else None
 
     lifetime = float(lifetime_months)
@@ -345,19 +356,24 @@ def unit_economics(
     ]
     if cac is not None:
         if acquired:
+            scope = "со счётом в портфеле" if portfolio_base else "по дате регистрации"
             assumptions.append(
-                f"CAC = расходы на привлечение / новые клиенты за период ({acquired} чел. "
-                f"по дате регистрации)."
+                f"CAC = расходы на привлечение / новые клиенты за период ({acquired} чел. {scope})."
             )
         else:
             assumptions.append(
                 "Нет даты регистрации клиентов: CAC считается на активного клиента — "
                 "это занижает CAC, если база растёт."
             )
-    if cac is None:
+    else:
         if not marketing:
             assumptions.append(
                 "Расходы на привлечение не найдены (нет колонки marketing_cost в finance): "
+                "CAC, LTV/CAC и окупаемость не рассчитываются."
+            )
+        elif acquired == 0:
+            assumptions.append(
+                "За окно finance нет новых клиентов с датой регистрации: делить не на кого, "
                 "CAC, LTV/CAC и окупаемость не рассчитываются."
             )
         else:
@@ -371,6 +387,7 @@ def unit_economics(
         "months": months,
         "active_clients": active_clients,
         "new_clients": acquired,
+        "cac_base": cac_base,
         "arpu": arpu,
         "margin_pct": margin_pct,
         "marketing_cost": marketing,
@@ -470,7 +487,15 @@ def macro_dynamics(series: pd.DataFrame, value_col: str = "value_mln_rub",
     return work
 
 
-def _robust_z(values: pd.Series) -> pd.Series:
+def robust_z(values: pd.Series) -> pd.Series:
+    """Робастный Z-score серии: MAD при n < 50, обычный Z при n ≥ 50.
+
+    Единственная реализация на весь скилл: ею пользуются раздел аномалий
+    (``macro_anomalies``) и интерактивный дашборд. Раньше у дашборда была своя
+    копия, и на одном и том же ряду отчёт показывал аномалию, а дашборд — нет.
+    Порядок фолбэков при вырожденном MAD: MAD → стандартное отклонение → ноль
+    для константного ряда (пропуски остаются пропусками).
+    """
     clean = values.dropna()
     if len(clean) < 3:
         return pd.Series(np.nan, index=values.index)
@@ -498,9 +523,9 @@ def macro_anomalies(df: pd.DataFrame, value_col: str = "value_mln_rub",
     work = df.copy()
     work[value_col] = pd.to_numeric(work[value_col], errors="coerce")
     if len(group_cols) == 0:
-        work["_z"] = _robust_z(work[value_col])
+        work["_z"] = robust_z(work[value_col])
         return work[work["_z"].abs() > threshold].copy()
-    work["_z"] = work.groupby(list(group_cols), dropna=False)[value_col].transform(_robust_z)
+    work["_z"] = work.groupby(list(group_cols), dropna=False)[value_col].transform(robust_z)
     result = work[work["_z"].abs() > threshold].copy()
     return result.sort_values("_z", key=lambda s: s.abs(), ascending=False)
 
