@@ -24,6 +24,7 @@ from .core import (
     assert_no_blocking_failures,
     load_tables,
     normalize_periods,
+    period_labels,
     validate_inputs,
 )
 from .metrics import (
@@ -327,6 +328,9 @@ def run(args: argparse.Namespace) -> int:
         metrics_payload["sections"]["portfolio"] = {
             "totals": result["totals"], "rows": records(frame),
         }
+        if result["totals"].get("excluded_total_rows"):
+            warnings.append("Портфель: итоговые строки product_code=ALL исключены из сумм — "
+                            f"{result['totals']['excluded_total_rows']} шт.")
         total_balance = result["totals"]["total_balance"]
         headline.append(headline_row("Остаток по портфелю", total_balance / 1e6, "млн руб.",
                                      "portfolio.balance", digits=1))
@@ -371,6 +375,9 @@ def run(args: argparse.Namespace) -> int:
                                                             "прямые расходы = фондирование + резервы."))
         totals = fin["totals"]
         metrics_payload["sections"]["finance"] = {"totals": totals, "rows": records(fin["rows"])}
+        if totals.get("excluded_total_rows"):
+            warnings.append("Финансы: итоговые строки product_code=ALL исключены из сумм — "
+                            f"{totals['excluded_total_rows']} шт.")
         headline.append(headline_row("Выручка", totals["revenue"] / 1e6, "млн руб.", "finance",
                                      digits=1))
         if totals.get("margin_pct") is not None:
@@ -410,12 +417,14 @@ def run(args: argparse.Namespace) -> int:
             )
         industry = _pick_industry(survey, indicator)
         series = _series(survey, indicator, industry)
-        sections.append(("Макро: динамика показателя", series.tail(36).assign(
-            period_start=lambda d: d["period_start"].dt.strftime("%Y-%m")),
-            f"Показатель: {indicator}. Отрасль: {industry}."))
+        # period_start может быть датой или текстом: .dt на тексте падает.
+        dynamics_view = series.tail(36).assign(
+            period_start=lambda d: period_labels(d["period_start"]))
+        sections.append(("Макро: динамика показателя", dynamics_view,
+                         f"Показатель: {indicator}. Отрасль: {industry}."))
         anomalies = macro_anomalies(series, value_col="value", group_cols=())
         if not anomalies.empty:
-            view = anomalies.assign(period_start=lambda d: d["period_start"].dt.strftime("%Y-%m"))
+            view = anomalies.assign(period_start=lambda d: period_labels(d["period_start"]))
             sections.append(("Макро: аномалии", view[["period_start", "value", "_z"]].rename(
                 columns={"period_start": "Период", "value": "Значение", "_z": "Z-score"}), ""))
         metrics_payload["sections"]["macro"] = {
@@ -494,13 +503,13 @@ def run(args: argparse.Namespace) -> int:
         totals = table.groupby("period_start", as_index=False)[value_col].sum()
         dynamics = macro_dynamics(totals, value_col=value_col)
         view = dynamics.tail(36).assign(
-            period_start=lambda d: d["period_start"].dt.strftime("%Y-%m"))
+            period_start=lambda d: period_labels(d["period_start"]))
         sections.append((f"{title}: динамика", view[["period_start", value_col, "change_pct"]], ""))
         anomalies = macro_anomalies(table, value_col=value_col,
                                     group_cols=(group_col,) if group_col else ())
         if not anomalies.empty:
             view_a = anomalies.assign(
-                period_start=lambda d: d["period_start"].dt.strftime("%Y-%m"))
+                period_start=lambda d: period_labels(d["period_start"]))
             columns = [c for c in ("period_start", group_col, value_col, "_z") if c and c in view_a.columns]
             sections.append((f"{title}: аномалии", view_a[columns], ""))
         chart = chart_series(totals, value_col, "period_start",

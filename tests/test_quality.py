@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 from finanalyst.core import validate_inputs
 
@@ -73,3 +74,47 @@ def test_missing_required_columns_are_warned():
     assert check.status == "warn"
     assert "account_id" in check.detail and "dpd" in check.detail
     assert not report.failed
+
+
+def test_missing_dpd_is_warning_not_failure():
+    """Пропуск dpd — не отрицательная просрочка: warn, а не fail с текстом «OK»."""
+    portfolio = pd.DataFrame({
+        "account_id": ["A1", "A2"],
+        "client_id": ["C1", "C2"],
+        "balance": [10.0, 20.0],
+        "dpd": [0.0, np.nan],
+    })
+    report = validate_inputs(_tables(portfolio))
+    non_negative = next(item for item in report.checks
+                        if item.check_id == "portfolio_dpd_non_negative")
+    missing = next(item for item in report.checks if item.check_id == "portfolio_dpd_missing")
+    assert non_negative.status == "pass"
+    assert non_negative.detail == "Отрицательных dpd: 0"
+    assert missing.status == "warn"
+    assert "Пропусков dpd: 1" in missing.detail
+    assert not report.failed
+
+
+def test_negative_dpd_still_fails():
+    portfolio = pd.DataFrame({
+        "account_id": ["A1"], "client_id": ["C1"], "balance": [10.0], "dpd": [-3],
+    })
+    report = validate_inputs(_tables(portfolio))
+    check = next(item for item in report.checks if item.check_id == "portfolio_dpd_non_negative")
+    assert check.status == "fail"
+    assert "Отрицательных dpd: 1" in check.detail
+
+
+def test_dpd_bucket_check_ignores_missing_dpd():
+    portfolio = pd.DataFrame({
+        "account_id": ["A1", "A2"],
+        "client_id": ["C1", "C2"],
+        "balance": [10.0, 20.0],
+        "dpd": [35, np.nan],
+        "par_bucket": ["60+", None],
+    })
+    report = validate_inputs(_tables(portfolio))
+    check = next(item for item in report.checks
+                 if item.check_id == "portfolio_dpd_bucket_consistent")
+    assert check.status == "pass"
+    assert "0" in check.detail

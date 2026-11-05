@@ -1,7 +1,7 @@
 ---
 name: financial-analyst
 description: "Анализ портфеля, воронки, юнит-экономики и прогноза."
-version: 1.0.1
+version: 1.0.2
 author: Denis Zakharov (@DenisZakharov2), Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
