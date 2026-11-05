@@ -171,3 +171,68 @@ def test_macro_survey_correlations(tmp_path):
                  "--adapter", "cbr", "--quiet"]) == 0
     metrics = json.loads((out / "metrics.json").read_text(encoding="utf-8"))
     assert metrics["sections"]["macro"]["indicator"] == "Индикатор бизнес-климата"
+
+
+def test_text_period_start_does_not_break_macro_sections(tmp_path):
+    """period_start текстом (готовая длинная таблица) — не повод падать с .dt."""
+    data = tmp_path / "survey"
+    data.mkdir()
+    rows = [{"period_start": date.strftime("%Y-%m"), "industry": "Экономика всего",
+             "indicator": "Индикатор бизнес-климата", "value": 1.0 + index}
+            for index, date in enumerate(pd.date_range("2023-01-01", periods=8, freq="MS"))]
+    pd.DataFrame(rows).to_csv(data / "macro_survey.csv", index=False)
+    out = tmp_path / "out"
+    assert main(["--data-dir", str(data), "--out", str(out), "--format", "xlsx",
+                 "--quiet"]) == 0
+    metrics = json.loads((out / "metrics.json").read_text(encoding="utf-8"))
+    assert metrics["sections"]["macro"]["points"] == 8
+    assert metrics["sections"]["forecast"]["available"]
+
+
+def test_broken_period_hits_quality_gate_instead_of_traceback(tmp_path):
+    """'2024-13' — неразобранный период: fail в контроле качества, а не исключение."""
+    data = tmp_path / "data"
+    data.mkdir()
+    pd.DataFrame({"period": ["2024-13", "2024-02"], "product_code": ["P1", "P1"],
+                  "interest_income": [10.0, 20.0]}).to_csv(data / "finance.csv", index=False)
+
+    strict = main(["--data-dir", str(data), "--out", str(tmp_path / "strict"),
+                   "--strict", "--format", "xlsx", "--quiet"])
+    assert strict == 2
+    relaxed = main(["--data-dir", str(data), "--out", str(tmp_path / "relaxed"),
+                    "--format", "xlsx", "--quiet"])
+    assert relaxed == 0
+    metrics = json.loads((tmp_path / "relaxed" / "metrics.json").read_text(encoding="utf-8"))
+    failed = [item["check_id"] for item in metrics["quality"]["checks"]
+              if item["status"] == "fail"]
+    assert failed == ["finance_periods_parsed"]
+
+
+def test_total_rows_are_excluded_and_reported(tmp_path):
+    """product_code=ALL не удваивает суммы, а факт исключения виден в отчёте."""
+    data = tmp_path / "data"
+    data.mkdir()
+    pd.DataFrame({
+        "period": ["2024-01", "2024-01", "2024-01"],
+        "product_code": ["P1", "P2", "ALL"],
+        "interest_income": [100.0, 200.0, 300.0],
+        "marketing_cost": [0.0, 0.0, 0.0],
+    }).to_csv(data / "finance.csv", index=False)
+    pd.DataFrame({
+        "account_id": ["A1", "A2", "A3"],
+        "client_id": ["C1", "C2", "C1"],
+        "product_code": ["P1", "P2", "ALL"],
+        "balance": [100.0, 200.0, 300.0],
+        "dpd": [0, 0, 0],
+    }).to_csv(data / "portfolio.csv", index=False)
+
+    out = tmp_path / "out"
+    assert main(["--data-dir", str(data), "--out", str(out), "--format", "xlsx",
+                 "--quiet"]) == 0
+    metrics = json.loads((out / "metrics.json").read_text(encoding="utf-8"))
+    assert metrics["sections"]["finance"]["totals"]["revenue"] == pytest.approx(300.0)
+    assert metrics["sections"]["finance"]["totals"]["excluded_total_rows"] == 1
+    assert metrics["sections"]["portfolio"]["totals"]["total_balance"] == pytest.approx(300.0)
+    assert metrics["sections"]["portfolio"]["totals"]["excluded_total_rows"] == 1
+    assert any("product_code=ALL" in item for item in metrics["warnings"])
+

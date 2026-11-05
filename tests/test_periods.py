@@ -31,6 +31,26 @@ def test_normalize_periods_sorts_by_date_not_string():
     assert result["period_start"].is_monotonic_increasing
 
 
+@pytest.mark.parametrize("value", ["2024-13", "2024-02-30", "19.2024", "0.2024"])
+def test_parse_period_returns_nat_for_impossible_dates(value):
+    """Невозможная дата — неразобранный период, а не исключение: его ловит контроль качества."""
+    parsed, period_type = parse_period(value)
+    assert pd.isna(parsed)
+    assert period_type == ""
+
+
+def test_canonical_period_keeps_impossible_date_as_text():
+    assert canonical_period("2024-13") == "2024-13"
+
+
+def test_normalize_periods_tolerates_impossible_dates():
+    frame = pd.DataFrame({"period": ["2024-13", "2024-02"], "value": [1, 2]})
+    result = normalize_periods(frame)
+    assert int(result["period_start"].isna().sum()) == 1
+    assert int(result["period_start"].notna().sum()) == 1
+    assert list(result.loc[result["period_start"].notna(), "value"]) == [2]
+
+
 @pytest.mark.parametrize("value,expected", [
     ("2024-01", "2024-01"),
     ("01.2024", "2024-01"),

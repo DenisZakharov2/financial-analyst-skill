@@ -7,6 +7,7 @@ from finanalyst.metrics import (
     forecast_trend,
     funnel_summary,
     macro_anomalies,
+    macro_dynamics,
     portfolio_summary,
     unit_economics,
 )
@@ -225,3 +226,78 @@ def test_nim_is_annualized_over_total_balance():
     # (30 − 12) / 3 мес / 2000 × 100 × 12 месяцев
     assert totals["nim_months"] == 3
     assert totals["nim_pct"] == pytest.approx(3.6)
+
+
+def test_finance_total_row_is_not_summed_with_detail():
+    """Правило словаря: product_code=ALL — итог, а не ещё один продукт."""
+    finance = pd.DataFrame({
+        "period": ["2024-01", "2024-01", "2024-01", "2024-02", "2024-02", "2024-02"],
+        "product_code": ["P1", "P2", "ALL"] * 2,
+        "interest_income": [100.0, 200.0, 300.0, 110.0, 220.0, 330.0],
+    })
+    result = finance_summary(finance)
+    assert result["totals"]["revenue"] == pytest.approx(630.0)
+    assert result["totals"]["excluded_total_rows"] == 2
+    assert set(result["rows"]["product_code"]) == {"P1", "P2"}
+
+
+def test_finance_keeps_total_row_when_there_is_no_detail():
+    """Если детализации нет, выкидывать итог нельзя: ряд станет пустым."""
+    finance = pd.DataFrame({
+        "period": ["2024-01", "2024-02"],
+        "product_code": ["ALL", "ALL"],
+        "interest_income": [300.0, 330.0],
+    })
+    result = finance_summary(finance)
+    assert result["totals"]["revenue"] == pytest.approx(630.0)
+    assert result["totals"]["excluded_total_rows"] == 0
+
+
+def test_portfolio_total_row_is_not_summed_with_detail():
+    portfolio = pd.DataFrame({
+        "account_id": ["AC1", "AC2", "AC3"],
+        "client_id": ["C1", "C2", "C1"],
+        "product_code": ["P1", "P2", "ALL"],
+        "balance": [100.0, 200.0, 300.0],
+        "dpd": [0, 0, 0],
+    })
+    products = pd.DataFrame({"product_code": ["P1", "P2"], "product_type": ["карта", "кредит"]})
+    result = portfolio_summary(portfolio, products)
+    assert result["totals"]["total_balance"] == pytest.approx(300.0)
+    assert result["totals"]["accounts"] == 2
+    assert result["totals"]["excluded_total_rows"] == 1
+
+
+def test_change_pct_is_null_when_previous_is_zero():
+    """Контракт change_pct: нулевая база → null, а не бесконечность в отчёте."""
+    series = pd.DataFrame({
+        "period_start": pd.date_range("2024-01-01", periods=4, freq="MS"),
+        "value_mln_rub": [0.0, 5.0, 0.0, 10.0],
+    })
+    frame = macro_dynamics(series)
+    assert pd.isna(frame.loc[0, "change_pct"])
+    assert pd.isna(frame.loc[1, "change_pct"])          # база 0 → null, а не inf
+    assert frame.loc[2, "change_pct"] == pytest.approx(-100.0)
+    assert pd.isna(frame.loc[3, "change_pct"])
+    assert np.isfinite(frame["change_pct"].dropna()).all()
+
+
+def test_yoy_uses_calendar_year_not_row_shift():
+    """Квартальный ряд: год назад — это 4 строки назад, а не 12."""
+    series = pd.DataFrame({
+        "period_start": pd.date_range("2020-01-01", periods=6, freq="QS"),
+        "value_mln_rub": [10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
+    })
+    frame = macro_dynamics(series)
+    assert pd.isna(frame["yoy_pct"].iloc[:4]).all()
+    assert frame["yoy_pct"].iloc[4] == pytest.approx(400.0)   # (50 − 10) / 10
+    assert frame["yoy_pct"].iloc[5] == pytest.approx(200.0)   # (60 − 20) / 20
+
+
+def test_yoy_is_skipped_for_daily_series():
+    """YoY не строится там, где шаг ряда не месяц/квартал/полугодие."""
+    series = pd.DataFrame({
+        "period_start": pd.date_range("2024-01-01", periods=20, freq="D"),
+        "value_mln_rub": [1.0] * 20,
+    })
+    assert "yoy_pct" not in macro_dynamics(series).columns

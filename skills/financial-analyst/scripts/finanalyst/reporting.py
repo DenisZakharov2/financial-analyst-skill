@@ -840,6 +840,7 @@ CHECK_TITLES = {
     "portfolio_pk_unique": "Уникальность account_id",
     "portfolio_balance_non_negative": "Отрицательные остатки портфеля",
     "portfolio_dpd_non_negative": "Отрицательная просрочка (dpd)",
+    "portfolio_dpd_missing": "Пропуски dpd в портфеле",
     "portfolio_fk_clients": "Связь портфеля с clients",
     "portfolio_fk_products": "Связь портфеля с products",
     "portfolio_dpd_bucket_consistent": "Согласованность dpd и par_bucket",

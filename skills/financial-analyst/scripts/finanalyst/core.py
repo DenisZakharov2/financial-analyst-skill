@@ -72,11 +72,31 @@ MONTHS_RU = {
 }
 
 
+def _timestamp(year, month=1, day=1) -> pd.Timestamp | pd.NaT:
+    """Дата из чисел; невозможная дата (`2024-13`, 30 февраля) даёт NaT, а не исключение.
+
+    Разбор периода идёт по данным пользователя, поэтому «13-й месяц» — это
+    неразобранный период (fail в контроле качества), а не падение с трейсбеком.
+    """
+    try:
+        return pd.Timestamp(year=int(year), month=int(month), day=int(day))
+    except (TypeError, ValueError):
+        return pd.NaT
+
+
+def _typed(timestamp: pd.Timestamp | pd.NaT, kind: str) -> tuple[pd.Timestamp | pd.NaT, str]:
+    """Пара (дата начала, тип периода); неразобранная дата — NaT и пустой тип."""
+    if pd.isna(timestamp):
+        return pd.NaT, ""
+    return timestamp, kind
+
+
 def parse_period(value) -> tuple[pd.Timestamp | pd.NaT, str]:
     """Разобрать период в дату начала и тип (D/M/Q/Y).
 
     Поддерживаются: 2026-01, 2026-01-15, 01.2026, 1к02, 1кв02, 2020 год,
-    январь 2020, даты Excel и pandas.
+    январь 2020, даты Excel и pandas. Невозможная дата (`2024-13`,
+    `2024-02-30`) даёт ``NaT`` и пустой тип: дальше её ловит контроль качества.
     """
     if value is None or (isinstance(value, float) and np.isnan(value)):
         return pd.NaT, ""
@@ -86,8 +106,7 @@ def parse_period(value) -> tuple[pd.Timestamp | pd.NaT, str]:
         return ts.normalize(), "D" if ts.day != 1 else "M"
 
     if hasattr(value, "year") and hasattr(value, "month") and not isinstance(value, str):
-        ts = pd.Timestamp(value.year, value.month, 1)
-        return ts, "M"
+        return _typed(_timestamp(value.year, value.month, 1), "M")
 
     text = str(value).strip().lower().replace("ё", "е")
     if not text:
@@ -95,42 +114,45 @@ def parse_period(value) -> tuple[pd.Timestamp | pd.NaT, str]:
 
     match = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", text)
     if match:
-        return pd.Timestamp(int(match[1]), int(match[2]), int(match[3])), "D"
+        return _typed(_timestamp(int(match[1]), int(match[2]), int(match[3])), "D")
 
     match = re.fullmatch(r"(\d{4})-(\d{2})", text)
     if match:
-        return pd.Timestamp(int(match[1]), int(match[2]), 1), "M"
+        return _typed(_timestamp(int(match[1]), int(match[2]), 1), "M")
 
     match = re.fullmatch(r"(\d{1,2})[./](\d{4})", text)
     if match:
-        return pd.Timestamp(int(match[2]), int(match[1]), 1), "M"
+        return _typed(_timestamp(int(match[2]), int(match[1]), 1), "M")
 
     match = re.fullmatch(r"(\d)\s*[кk][вb]?\s*(\d{2,4})", text)
     if match:
         quarter, year = int(match[1]), int(match[2])
         year = year + 2000 if year < 100 else year
         if 1 <= quarter <= 4:
-            return pd.Timestamp(year, 3 * (quarter - 1) + 1, 1), "Q"
+            return _typed(_timestamp(year, 3 * (quarter - 1) + 1, 1), "Q")
 
     match = re.fullmatch(r"(\d{4})\s*(год|г\.?)?", text)
     if match:
-        return pd.Timestamp(int(match[1]), 1, 1), "Y"
+        return _typed(_timestamp(int(match[1]), 1, 1), "Y")
 
     match = re.fullmatch(r"([а-я]+)\s*(\d{4})", text)
     if match:
         stem, year = match[1], int(match[2])
         month = next((num for key, num in MONTHS_RU.items() if stem.startswith(key)), None)
         if month:
-            return pd.Timestamp(year, month, 1), "M"
+            return _typed(_timestamp(year, month, 1), "M")
 
     match = re.fullmatch(r"(\d{4})\s*[-/]\s*([а-я]+)", text)
     if match:
         year, stem = int(match[1]), match[2]
         month = next((num for key, num in MONTHS_RU.items() if stem.startswith(key)), None)
         if month:
-            return pd.Timestamp(year, month, 1), "M"
+            return _typed(_timestamp(year, month, 1), "M")
 
-    parsed = pd.to_datetime(text, errors="coerce", dayfirst=True)
+    try:
+        parsed = pd.to_datetime(text, errors="coerce", dayfirst=True)
+    except (TypeError, ValueError):  # pandas может бросить на экзотическом вводе
+        return pd.NaT, ""
     if pd.notna(parsed):
         return pd.Timestamp(parsed).normalize(), "D"
     return pd.NaT, ""
@@ -158,6 +180,57 @@ def normalize_periods(df: pd.DataFrame, column: str = "period") -> pd.DataFrame:
     result["period_type"] = [p[1] for p in pairs]
     result = result.sort_values("period_start", kind="stable").reset_index(drop=True)
     return result
+
+
+def period_labels(values: pd.Series, fmt: str = "%Y-%m") -> pd.Series:
+    """Подпись периода для отчёта: ``YYYY-MM`` из даты или из текста.
+
+    Колонка ``period_start`` может прийти датой (после ``normalize_periods``)
+    или текстом (готовая длинная таблица). ``.dt`` на тексте падает, поэтому
+    дата приводится через ``to_datetime``, а неразобранный текст остаётся как есть.
+    """
+    dates = pd.to_datetime(values, errors="coerce")
+    return dates.dt.strftime(fmt).fillna(values.astype(str))
+
+
+# Итоговые строки: по словарю данных это `product_code = 'ALL'`.
+TOTAL_CODES = frozenset({"ALL"})
+
+
+def drop_total_rows(
+    df: pd.DataFrame | None,
+    column: str = "product_code",
+    group: tuple[str, ...] = ("period",),
+) -> tuple[pd.DataFrame | None, int]:
+    """Убрать итоговые строки (``product_code = 'ALL'``), если рядом есть детализация.
+
+    Словарь данных (§3, §7) требует не суммировать итог вместе с детализацией:
+    иначе выручка и баланс удваиваются. Правило выполняется здесь, до группировки,
+    чтобы одинаково работать и для ``finance``, и для ``portfolio``.
+
+    Если в срезе (по умолчанию — внутри одного периода) детализации нет,
+    итоговые строки остаются: иначе ряд из одного «ALL» стал бы пустым.
+    Возвращает таблицу и число исключённых строк.
+    """
+    if df is None or df.empty or column not in df.columns:
+        return df, 0
+
+    is_total = df[column].astype(str).str.strip().str.upper().isin(TOTAL_CODES)
+    if not is_total.any():
+        return df, 0
+
+    detailed = ~is_total
+    keys = [key for key in group if key in df.columns]
+    if keys:
+        has_detail = detailed.groupby([df[key] for key in keys], dropna=False).transform("any")
+        drop = is_total & has_detail
+    else:
+        drop = is_total & detailed.any()
+
+    count = int(drop.sum())
+    if not count:
+        return df, 0
+    return df.loc[~drop].copy(), count
 
 
 # --------------------------------------------------------------------------
@@ -259,8 +332,16 @@ def validate_inputs(tables: dict[str, pd.DataFrame]) -> QualityReport:
                        f"Отрицательных остатков: {negatives}", warn_only=True)
         dpd = _numeric(portfolio, "dpd")
         if len(dpd):
-            report.add("portfolio_dpd_non_negative", bool((dpd >= 0).all()),
-                       "Отрицательный dpd встречается" if (dpd < 0).any() else "OK")
+            missing = int(dpd.isna().sum())
+            if missing:
+                # Пропуск — не отрицательная просрочка: это warn, а не fail.
+                # В расчёте (portfolio_summary) такой dpd считается нулевым,
+                # и предупреждение говорит об этом прямо.
+                report.add("portfolio_dpd_missing", False,
+                           f"Пропусков dpd: {missing}; в расчёте считаются нулевой просрочкой.",
+                           warn_only=True)
+            report.add("portfolio_dpd_non_negative", bool((dpd.dropna() >= 0).all()),
+                       f"Отрицательных dpd: {int((dpd < 0).sum())}")
         if clients is not None and "client_id" in portfolio.columns and "client_id" in clients.columns:
             coverage = portfolio["client_id"].isin(clients["client_id"]).mean()
             report.add("portfolio_fk_clients", coverage >= 0.99,
@@ -271,8 +352,12 @@ def validate_inputs(tables: dict[str, pd.DataFrame]) -> QualityReport:
                        f"Покрытие product_code: {coverage:.1%}", warn_only=True)
         if {"dpd", "par_bucket"} <= set(portfolio.columns):
             dpd = _numeric(portfolio, "dpd")
-            bucket = portfolio["par_bucket"].astype(str).str.strip()
-            expected = pd.cut(dpd, [-1, 0, 30, 60, 10**9], labels=["current", "30+", "60+", "90+"])
+            # Сравниваем только строки с известным dpd: у пропуска бакета нет,
+            # и он уже отдельно отмечен проверкой portfolio_dpd_missing.
+            known = dpd.notna()
+            bucket = portfolio.loc[known, "par_bucket"].astype(str).str.strip()
+            expected = pd.cut(dpd[known], [-1, 0, 30, 60, 10**9],
+                              labels=["current", "30+", "60+", "90+"])
             mismatched = int((bucket != expected.astype(str)).sum())
             report.add("portfolio_dpd_bucket_consistent", mismatched == 0,
                        f"Несогласованных строк dpd/par_bucket: {mismatched}", warn_only=True)
@@ -281,6 +366,14 @@ def validate_inputs(tables: dict[str, pd.DataFrame]) -> QualityReport:
             if len(currencies) > 1:
                 report.warnings.append(
                     "В портфеле несколько валют (%s): суммы не сопоставимы без курса." % ", ".join(currencies)
+                )
+        if "product_code" in portfolio.columns:
+            total_rows = int(portfolio["product_code"].astype(str).str.strip().str.upper()
+                             .isin(TOTAL_CODES).sum())
+            if total_rows:
+                report.warnings.append(
+                    f"В портфеле {total_rows} строк с product_code=ALL: это итог, "
+                    "с детализацией он не суммируется."
                 )
 
     if clients is not None and "client_id" in clients.columns:
@@ -310,10 +403,12 @@ def validate_inputs(tables: dict[str, pd.DataFrame]) -> QualityReport:
             report.add("finance_grain_unique", dup == 0,
                        f"Дублей period+product_code: {dup}")
         if "product_code" in finance.columns:
-            all_rows = int((finance["product_code"].astype(str).str.upper() == "ALL").sum())
+            all_rows = int(finance["product_code"].astype(str).str.strip().str.upper()
+                           .isin(TOTAL_CODES).sum())
             if all_rows:
                 report.warnings.append(
-                    f"В finance {all_rows} строк с product_code=ALL: при суммировании они удвоят итог."
+                    f"В finance {all_rows} строк с product_code=ALL: это итог, "
+                    "с детализацией он не суммируется."
                 )
         if "period" in finance.columns:
             normalized = normalize_periods(finance)

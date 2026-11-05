@@ -9,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from .core import canonical_period, parse_period
+from .core import canonical_period, drop_total_rows, parse_period
 
 STAGE_ORDER = ["лид", "обращение", "заявка", "одобрение", "договор", "активация"]
 STAGE_RANK = {stage: i + 1 for i, stage in enumerate(STAGE_ORDER)}
@@ -100,6 +100,8 @@ def portfolio_summary(
     df["balance"] = _num(df, "balance")
     df["limit_amount"] = _num(df, "limit_amount")
     df["dpd"] = _num(df, "dpd", default=0.0).fillna(0.0)
+    # Итоговую строку product_code=ALL не суммируем с детализацией (словарь данных, §3).
+    df, excluded = drop_total_rows(df, group=())
 
     if products is not None and "product_code" in df.columns:
         ref = products[["product_code", "product_type"]] if "product_type" in products.columns else None
@@ -144,6 +146,7 @@ def portfolio_summary(
         "par60_pct": _overall_par(df, 60),
         "par90_pct": _overall_par(df, 90),
         "top10_clients_share_pct": concentration,
+        "excluded_total_rows": excluded,
     }
     return {"rows": rows, "totals": totals, "rows_total": int(len(df))}
 
@@ -237,6 +240,9 @@ def finance_summary(finance: pd.DataFrame, portfolio: pd.DataFrame | None = None
         if column in df.columns:
             df[column] = pd.to_numeric(df[column], errors="coerce")
 
+    # Итоговую строку product_code=ALL не суммируем с детализацией (словарь данных, §7).
+    df, excluded = drop_total_rows(df, group=("period",))
+
     def col(name: str) -> pd.Series:
         return df[name].fillna(0.0) if name in df.columns else pd.Series(0.0, index=df.index)
 
@@ -268,6 +274,7 @@ def finance_summary(finance: pd.DataFrame, portfolio: pd.DataFrame | None = None
         "margin_pct": round(gross / revenue * 100, 2) if revenue else None,
         "margin_ratio": (gross / revenue) if revenue else None,
         "marketing_cost": float(col("marketing_cost").sum()) if "marketing_cost" in df.columns else None,
+        "excluded_total_rows": excluded,
     }
 
     if portfolio is not None and "balance" in portfolio.columns:
@@ -394,16 +401,72 @@ def macro_structure(df: pd.DataFrame, value_col: str = "value_mln_rub",
     return rows
 
 
+# Шаг регулярного ряда в днях → сколько месяцев он покрывает.
+STEP_MONTHS = ((27, 32, 1), (85, 95, 3), (175, 190, 6), (360, 370, 12))
+
+
+def _median_step_days(periods: pd.Series) -> float | None:
+    """Медианный шаг ряда в днях; None, если разбираемых дат меньше двух."""
+    dates = pd.to_datetime(pd.Series(periods), errors="coerce").dropna()
+    if len(dates) < 2:
+        return None
+    diffs = dates.sort_values().diff().dropna().dt.days
+    return float(diffs.median()) if len(diffs) else None
+
+
+def _step_months(periods: pd.Series) -> int | None:
+    """Шаг ряда в месяцах (1, 3, 6, 12) или None для неровного и дневного ряда."""
+    days = _median_step_days(periods)
+    if days is None:
+        return None
+    for low, high, months in STEP_MONTHS:
+        if low <= days <= high:
+            return months
+    return None
+
+
+def _pct_change(current: pd.Series, previous: pd.Series) -> pd.Series:
+    """Темп в процентах; нулевая или отсутствующая база → null, а не бесконечность."""
+    base = previous.replace(0, np.nan)
+    return ((current - base) / base * 100).round(2)
+
+
+def _yoy_pct(work: pd.DataFrame, value_col: str, period_col: str) -> pd.Series | None:
+    """YoY по календарю: значение того же периода год назад.
+
+    None — если медианный шаг ряда не месяц, квартал и не полугодие:
+    для дневного и недельного ряда «год назад» не выражается шагом строк.
+    """
+    if _step_months(work[period_col]) not in (1, 3, 6):
+        return None
+    dates = pd.to_datetime(work[period_col], errors="coerce")
+    lookup = pd.Series(work[value_col].to_numpy(dtype="float64"), index=dates)
+    lookup = lookup[lookup.index.notna()]
+    lookup = lookup[~lookup.index.duplicated(keep="last")].sort_index()
+    if lookup.empty:
+        return None
+    shifted = lookup.reindex(lookup.index - pd.DateOffset(months=12))
+    previous = pd.Series(shifted.to_numpy(), index=lookup.index)
+    return _pct_change(work[value_col].astype("float64"), dates.map(previous))
+
+
 def macro_dynamics(series: pd.DataFrame, value_col: str = "value_mln_rub",
                    period_col: str = "period_start") -> pd.DataFrame:
-    """Темп к предыдущему периоду и YoY, если ряд месячный и данных хватает."""
+    """Темп к предыдущему периоду и YoY по календарю, когда шаг ряда это позволяет.
+
+    YoY считается только для регулярных месячных, квартальных и полугодовых рядов
+    и сравнивается с тем же периодом год назад, а не со сдвигом на 12 строк:
+    на квартальном ряду сдвиг на 12 строк — это три года, а не один.
+    Нулевая база даёт ``null``, а не бесконечность (контракт ``change_pct``).
+    """
     if period_col not in series.columns:
         raise MetricError(f"Нет колонки {period_col!r}: сначала normalize_periods")
     work = series.sort_values(period_col).copy()
     work[value_col] = pd.to_numeric(work[value_col], errors="coerce")
-    work["change_pct"] = (work[value_col].pct_change() * 100).round(2)
-    if len(work) >= 13:
-        work["yoy_pct"] = (work[value_col].pct_change(12) * 100).round(2)
+    work["change_pct"] = _pct_change(work[value_col], work[value_col].shift(1))
+    yoy = _yoy_pct(work, value_col, period_col)
+    if yoy is not None:
+        work["yoy_pct"] = yoy
     return work
 
 
@@ -485,7 +548,9 @@ def forecast_trend(series: pd.DataFrame, value_col: str = "value",
     Границы — базовая линия ± band × MAE бэктеста. Это честнее множителей:
     для убывающего или отрицательного ряда множитель меняет знак смысла.
     """
-    data = series.dropna(subset=[value_col, period_col]).sort_values(period_col)
+    data = series.copy()
+    data[period_col] = pd.to_datetime(data[period_col], errors="coerce")
+    data = data.dropna(subset=[value_col, period_col]).sort_values(period_col)
     if len(data) < 6:
         return {"available": False, "reason": "нужно минимум 6 периодов"}
 
@@ -530,10 +595,9 @@ def forecast_trend(series: pd.DataFrame, value_col: str = "value",
 
 
 def _infer_step(periods: pd.Series) -> pd.DateOffset:
-    diffs = pd.Series(pd.to_datetime(periods)).diff().dropna().dt.days
-    median = float(diffs.median()) if len(diffs) else 30.0
-    if median >= 300:
+    days = _median_step_days(periods) or 30.0
+    if days >= 300:
         return pd.DateOffset(years=1)
-    if median >= 80:
+    if days >= 80:
         return pd.DateOffset(months=3)
     return pd.DateOffset(months=1)
