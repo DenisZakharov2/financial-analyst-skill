@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -111,8 +112,13 @@ def fmt_num(value, digits: int = 2) -> str:
         number = float(value)
     except (TypeError, ValueError):
         return str(value)
-    if abs(number) < 1 and number != 0:
-        digits = max(digits, 4)
+    if not math.isfinite(number):
+        # Бесконечность в отчёте — это дефект расчёта, а не число.
+        return "—"
+    if number != 0 and abs(number) < 10 ** -digits:
+        # Мелкое значение не должно превращаться в «0,00»: показываем первые
+        # значащие цифры, но не больше восьми знаков после запятой.
+        digits = min(8, max(digits, int(-math.floor(math.log10(abs(number)))) + 1))
     text = f"{number:,.{digits}f}".replace(",", " ").replace(".", ",")
     return text
 
@@ -125,6 +131,8 @@ def _fmt_pct(value, digits: int = 2) -> str:
         number = float(value)
     except (TypeError, ValueError):
         return str(value)
+    if not math.isfinite(number):
+        return "—"
     return f"{number:,.{digits}f}".replace(",", " ").replace(".", ",") + " %"
 
 
@@ -183,6 +191,18 @@ def resolve_font() -> Path:
 # DOCX
 # --------------------------------------------------------------------------
 
+def report_timestamp(report: ReportData, fmt: str = "%d.%m.%Y %H:%M") -> str:
+    """Единая дата формирования отчёта.
+
+    Берётся из ``meta`` (её же пишет `metrics.json`), поэтому DOCX, PDF, XLSX,
+    PPTX, RTF и HTML показывают одно и то же время, а не шесть разных секунд.
+    """
+    moment = pd.to_datetime(report.meta.get("generated_at"), errors="coerce")
+    if pd.isna(moment):
+        moment = pd.Timestamp.now()
+    return pd.Timestamp(moment).strftime(fmt)
+
+
 def _chart_title(name: str) -> str:
     return f"График: {name}"
 
@@ -211,7 +231,7 @@ def write_docx(report: ReportData, path: Path) -> Path:
         subtitle.runs[0].font.color.rgb = None
 
     document.add_paragraph(
-        f"Дата формирования: {pd.Timestamp.now().strftime('%d.%m.%Y %H:%M')} · "
+        f"Дата формирования: {report_timestamp(report)} · "
         f"Версия скилла: {report.meta.get('version', '—')}"
     )
 
@@ -346,7 +366,7 @@ def write_pdf(report: ReportData, path: Path) -> Path:
         story.append(Paragraph(escape(report.subtitle), styles["RuBody"]))
     story.append(Spacer(1, 8))
     story.append(Paragraph(
-        f"Дата формирования: {pd.Timestamp.now().strftime('%d.%m.%Y %H:%M')} · "
+        f"Дата формирования: {report_timestamp(report)} · "
         f"версия скилла {escape(str(report.meta.get('version', '—')))}",
         styles["RuBody"]))
     story.append(Spacer(1, 12))
@@ -431,7 +451,7 @@ def write_xlsx(report: ReportData, path: Path) -> Path:
     sheet.title = "Отчёт"
     sheet["A1"] = report.title
     sheet["A1"].font = Font(bold=True, size=14)
-    sheet["A2"] = f"Дата: {pd.Timestamp.now().strftime('%d.%m.%Y %H:%M')}"
+    sheet["A2"] = f"Дата: {report_timestamp(report, '%d.%m.%Y')}"
     sheet["A2"].font = Font(size=9, color="6B7280")
 
     row = 4
@@ -548,7 +568,7 @@ def write_pptx(report: ReportData, path: Path) -> Path:
         box.text_frame.text = report.subtitle
         box.text_frame.paragraphs[0].font.size = Pt(16)
     box = slide.shapes.add_textbox(Inches(0.6), Inches(6.6), Inches(9), Inches(0.4))
-    box.text_frame.text = (f"{pd.Timestamp.now().strftime('%d.%m.%Y')} · "
+    box.text_frame.text = (f"{report_timestamp(report, '%d.%m.%Y')} · "
                            f"скилл financial-analyst {report.meta.get('version', '')}")
     box.text_frame.paragraphs[0].font.size = Pt(11)
     add_footer(slide, 1)
@@ -556,7 +576,7 @@ def write_pptx(report: ReportData, path: Path) -> Path:
     content_sections = [(name, frame) for name, frame, _ in report.sections if frame is not None and not frame.empty]
     charts = [(name, path) for name, path in report.charts.items() if path and Path(path).exists()]
 
-    total = 1 + (1 if len(content_sections) + len(charts) > 4 else 0) + len(content_sections) + len(charts)
+    total = len(content_sections) + len(charts)
     if total > 4:
         slide = presentation.slides.add_slide(layout)
         add_title(slide, "Содержание", size=22)
@@ -571,7 +591,7 @@ def write_pptx(report: ReportData, path: Path) -> Path:
     for name, frame in content_sections:
         slide = presentation.slides.add_slide(layout)
         add_title(slide, name, size=18)
-        rows = min(len(frame) + 1, 14)
+        rows = min(len(frame) + 1, 9)
         columns = min(len(frame.columns), 8)
         numeric = _numeric_positions(frame)
         shape = slide.shapes.add_table(rows, columns, Inches(0.6), Inches(1.4),
@@ -635,7 +655,7 @@ def write_rtf(report: ReportData, path: Path) -> Path:
     para(report.title, bold=True, size=34)
     if report.subtitle:
         para(report.subtitle, size=22)
-    para(f"Дата формирования: {pd.Timestamp.now().strftime('%d.%m.%Y %H:%M')}")
+    para(f"Дата формирования: {report_timestamp(report)}")
     lines.append("\\par")
 
     def table_text(frame: pd.DataFrame) -> str:
@@ -804,7 +824,7 @@ def write_html(report: ReportData, path: Path) -> Path:
 </style></head>
 <body><main>
 <h1>{html_lib.escape(report.title)}</h1>
-<div class="meta">{html_lib.escape(report.subtitle)} · сформировано {pd.Timestamp.now().strftime('%d.%m.%Y %H:%M')}</div>
+<div class="meta">{html_lib.escape(report.subtitle)} · сформировано {report_timestamp(report)}</div>
 {''.join(parts)}
 </main></body></html>"""
     path.write_text(document, encoding="utf-8")

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "financial-analyst-skill"
-version = "1.0.3"
+version = "1.0.4"
 description = "Financial analyst skill for Hermes Agent: portfolio, funnel, unit economics, forecasting"
 readme = "README.md"
 requires-python = ">=3.10"

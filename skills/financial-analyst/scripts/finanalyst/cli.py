@@ -491,7 +491,7 @@ def run(args: argparse.Namespace) -> int:
                 **{name: values for name, values in forecast["scenarios"].items()},
             })
             sections.append(("Прогноз: значения", frame,
-                             f"MAE: {forecast['mae']}; MAPE: {forecast['mape_pct']} %"))
+                             f"MAE: {forecast['mae']}; MAPE: {forecast['mape_pct'] if forecast['mape_pct'] is not None else '— (все факты в бэктесте = 0)'} %"))
             chart = chart_forecast(forecast, charts_dir / "forecast.png")
             if chart:
                 charts["Прогноз по сценариям"] = chart
