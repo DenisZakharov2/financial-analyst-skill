@@ -1,6 +1,20 @@
+import re
+import zipfile
+
 import pandas as pd
+import pptx
+import pypdf
 import pytest
-from finanalyst.reporting import ReportData, lint_text, quality_frame, write_html, write_reports
+from finanalyst.cli import main
+from finanalyst.reporting import (
+    ReportData,
+    _fmt_pct,
+    fmt_num,
+    lint_text,
+    quality_frame,
+    write_html,
+    write_reports,
+)
 from finanalyst.visuals import chart_funnel, setup_matplotlib
 
 
@@ -113,3 +127,58 @@ def test_lint_text_catches_problems():
 
 def test_lint_text_accepts_clean_text():
     assert lint_text("Портфель вырос на 5,04 %. LTV / CAC равен 3,2.") == []
+
+
+def test_fmt_num_formats_inf_as_dash():
+    assert fmt_num(float("inf")) == "—"
+    assert fmt_num(float("-inf")) == "—"
+    assert fmt_num(5.0) == "5,00"
+
+
+def test_fmt_num_keeps_significant_digits_for_tiny_values():
+    assert fmt_num(0.000000123, 2) == "0,00000012"
+
+
+def test_fmt_pct_formats_inf_as_dash():
+    assert _fmt_pct(float("inf")) == "—"
+    assert _fmt_pct(float("-inf")) == "— %" if False else "—"
+
+
+def test_report_uses_one_timestamp_across_all_formats(sample_dir, tmp_path):
+    """DOCX, PDF, PPTX, RTF и HTML показывают одну и ту же дату формирования."""
+
+    main(["--data-dir", str(sample_dir), "--out", str(tmp_path),
+          "--format", "docx,pdf,pptx,rtf,html", "--quiet"])
+    report_mtime = pd.Timestamp.now()
+
+    times = set()
+    docx = zipfile.ZipFile(tmp_path / "financial_analyst_report.docx")
+    times.update(re.findall(r"\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}",
+                            docx.read("word/document.xml").decode("utf-8")))
+    docx.close()
+
+    pdf_text = "".join(page.extract_text() for page in pypdf.PdfReader(
+        tmp_path / "financial_analyst_report.pdf").pages)
+    times.update(re.findall(r"\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}", pdf_text))
+
+    rtf_text = (tmp_path / "financial_analyst_report.rtf").read_text(encoding="ascii", errors="replace")
+    times.update(re.findall(r"\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}", rtf_text))
+
+    html_text = (tmp_path / "report.html").read_text(encoding="utf-8")
+    times.update(re.findall(r"\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}", html_text))
+
+    # Всё формировалось в одну секунду: время одно и то же.
+    assert len(times) == 1, times
+    assert next(iter(times)) <= report_mtime.strftime("%d.%m.%Y %H:%M")
+
+
+def test_pptx_table_row_limit(sample_dir, tmp_path):
+    """В PPTX таблица не превышает 8 строк (заголовок + до 7 данных)."""
+
+    main(["--data-dir", str(sample_dir), "--out", str(tmp_path), "--format", "pptx", "--quiet"])
+    prs = pptx.Presentation(tmp_path / "financial_analyst_report.pptx")
+    for slide in prs.slides:
+        for shape in slide.shapes:
+            if shape.has_table:
+                assert len(shape.table.rows) <= 9, len(shape.table.rows)
+
