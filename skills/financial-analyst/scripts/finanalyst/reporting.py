@@ -125,15 +125,8 @@ def fmt_num(value, digits: int = 2) -> str:
 
 def _fmt_pct(value, digits: int = 2) -> str:
     """Процент с запятой как десятичным разделителем (правило style-ru)."""
-    if value is None or (isinstance(value, float) and np.isnan(value)):
-        return "—"
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return str(value)
-    if not math.isfinite(number):
-        return "—"
-    return f"{number:,.{digits}f}".replace(",", " ").replace(".", ",") + " %"
+    formatted = fmt_num(value, digits=digits)
+    return "—" if formatted == "—" else f"{formatted} %"
 
 
 def _fmt_cell(value, column: str = "") -> str:
@@ -715,21 +708,43 @@ ALLOWED_LATIN = {
 }
 
 
+_URL_RE = re.compile(r"https?://\S+|www\.\S+")
+_INLINE_CODE_RE = re.compile(r"`[^`]*`")
+
+
+def _strip_code_and_urls(line: str) -> str:
+    """Убрать inline-код, URL и fenced-блоки из строки перед проверкой латиницы."""
+    line = _INLINE_CODE_RE.sub("", line)
+    line = _URL_RE.sub("", line)
+    return line
+
+
 def lint_text(text: str) -> list[str]:
-    """Проверить текст на смешение алфавитов, двойные пробелы и латиницу."""
+    """Проверить текст на смешение алфавитов, двойные пробелы и латиницу.
+
+    Внутри fenced-блоков `` ``` ``, inline-кода `` `...` `` и URL латиница
+    не считается ошибкой: там могут быть имена файлов, колонок, кода.
+    """
     issues: list[str] = []
+    in_code_block = False
     for number, line in enumerate(text.splitlines(), start=1):
-        if re.search(r"[ \t]{2,}\S", line) and not line.lstrip().startswith("|"):
+        if line.startswith("```"):
+            in_code_block = not in_code_block
+            continue
+        if in_code_block:
+            continue
+        clean = _strip_code_and_urls(line)
+        if re.search(r"[ \t]{2,}\S", clean) and not clean.lstrip().startswith("|"):
             issues.append(f"строка {number}: двойной пробел")
         if line.rstrip() != line:
             issues.append(f"строка {number}: пробел в конце строки")
-        for match in re.finditer(r"[A-Za-zА-Яа-яЁё]+", line):
+        for match in re.finditer(r"[A-Za-zА-Яа-яЁё]+", clean):
             word = match.group()
             latin = any("LATIN" in unicodedata.name(ch, "") for ch in word)
             cyrillic = any("CYRILLIC" in unicodedata.name(ch, "") for ch in word)
             if latin and cyrillic:
                 issues.append(f"строка {number}: смешение алфавитов в слове {word!r}")
-        for match in re.finditer(r"\b[A-Za-z][A-Za-z-]{2,}\b", line):
+        for match in re.finditer(r"\b[A-Za-z][A-Za-z0-9-]+\b", clean):
             word = match.group()
             if word.lower() not in ALLOWED_LATIN:
                 issues.append(f"строка {number}: латиница вне терминов — {word!r}")

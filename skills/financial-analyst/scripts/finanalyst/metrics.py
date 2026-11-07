@@ -65,12 +65,18 @@ def _new_clients(clients: pd.DataFrame | None, finance: pd.DataFrame,
     dates = pd.to_datetime(clients[date_column], errors="coerce")
     if dates.notna().sum() == 0:
         return None
-    starts = [start for start in (parse_period(value)[0] for value in finance["period"])
-              if pd.notna(start)]
-    if not starts:
+    parsed_periods = [
+        (start, kind)
+        for start, kind in (parse_period(value) for value in finance["period"])
+        if pd.notna(start)
+    ]
+    if not parsed_periods:
         return None
-    begin = min(starts)
-    end = max(starts) + pd.DateOffset(months=1)
+    begin = min(start for start, _ in parsed_periods)
+    end = max(
+        start + (pd.Timedelta(days=1) if kind == "D" else pd.DateOffset(months=PERIOD_MONTHS.get(kind, 1)))
+        for start, kind in parsed_periods
+    )
     window = (dates >= begin) & (dates < end)
     if portfolio is not None and "client_id" in portfolio.columns:
         window &= clients["client_id"].isin(portfolio["client_id"].dropna())
@@ -82,9 +88,10 @@ def _normalize_stage(value: str) -> str:
     aliases = {
         "lead": "лид", "лиды": "лид",
         "application": "заявка", "заявки": "заявка",
-        "approval": "одобрение", "одобрено": "одобрение",
-        "contract": "договор", "сделка": "договор",
+        "approval": "одобрение", "одобрено": "одобрение", "approve": "одобрение", "approved": "одобрение",
+        "contract": "договор", "сделка": "договор", "issued": "договор",
         "activation": "активация", "актив": "активация",
+        "contact": "обращение", "inquiry": "обращение",
     }
     return aliases.get(text, text)
 
@@ -234,7 +241,8 @@ def funnel_summary(events: pd.DataFrame, stage_column: str = "stage") -> dict:
 # Юнит-экономика
 # --------------------------------------------------------------------------
 
-def finance_summary(finance: pd.DataFrame, portfolio: pd.DataFrame | None = None) -> dict:
+def finance_summary(finance: pd.DataFrame, portfolio: pd.DataFrame | None = None,
+                    products: pd.DataFrame | None = None) -> dict:
     """Выручка, прямые расходы, валовая и contribution margin по периодам."""
     if finance is None or finance.empty:
         raise MetricError("Таблица finance пуста")
@@ -286,9 +294,19 @@ def finance_summary(finance: pd.DataFrame, portfolio: pd.DataFrame | None = None
     }
 
     if portfolio is not None and "balance" in portfolio.columns:
-        # Портфель — снимок на дату, поэтому средние активы приближены суммой
-        # остатков: среднее по строкам дало бы баланс одного счёта, а не банка.
-        avg_assets = float(pd.to_numeric(portfolio["balance"], errors="coerce").sum())
+        # Итоговую строку product_code=ALL не суммируем с детализацией.
+        clean_port, _ = drop_total_rows(portfolio, group=())
+        # В знаменатель NIM попадают только работающие (кредитные) активы:
+        # депозиты и страхование — пассивы, не кредитные остатки.
+        work_port = clean_port
+        if products is not None and "product_code" in clean_port.columns and "product_type" in products.columns:
+            ref = products[["product_code", "product_type"]].drop_duplicates("product_code")
+            work_port = clean_port.merge(ref, on="product_code", how="left")
+            credit_types = {"кредит_потребительский", "кредитная_карта", "кредитная карта",
+                            "кредит", "overdraft", "кредитная линия"}
+            work_port = work_port[work_port["product_type"].isin(credit_types) |
+                                  work_port["product_type"].isna()]
+        avg_assets = float(pd.to_numeric(work_port["balance"], errors="coerce").sum())
         months = max(_months_in_periods(df["period"]), 1) if "period" in df.columns else 1
         if avg_assets and months:
             interest = float(col("interest_income").sum())
@@ -317,8 +335,14 @@ def unit_economics(
     margin_pct = fin["margin_pct"]
     margin_ratio = fin.get("margin_ratio") or 0.0
 
+    work_portfolio = portfolio
     if portfolio is not None and "client_id" in portfolio.columns:
-        active_clients = int(portfolio["client_id"].nunique())
+        clean_port, _ = drop_total_rows(portfolio, group=())
+        if "status" in clean_port.columns:
+            clean_port = clean_port[clean_port["status"].astype(str).str.strip().str.lower() != "закрыт"]
+        work_portfolio = clean_port
+    if work_portfolio is not None and "client_id" in work_portfolio.columns:
+        active_clients = int(work_portfolio["client_id"].nunique())
         client_source = "portfolio.client_id"
     elif clients is not None and "client_id" in clients.columns:
         active_clients = int(clients["client_id"].nunique())
@@ -347,7 +371,9 @@ def unit_economics(
     ltv_net = (ltv_gross - cac) if (ltv_gross is not None and cac is not None) else None
     ratio = (ltv_gross / cac) if (ltv_gross is not None and cac) else None
     monthly_margin = (arpu * margin_ratio) if arpu else None
-    payback = (cac / monthly_margin) if (cac and monthly_margin) else None
+    # Отрицательная или нулевая валовая маржа означает убыток на каждого клиента:
+    # привлечение не окупается, срок окупаемости и LTV/CAC не определяются.
+    payback = (cac / monthly_margin) if (cac and monthly_margin and monthly_margin > 0) else None
 
     assumptions = [
         f"Срок жизни клиента принят {lifetime:.0f} мес. (параметр lifetime_months).",
@@ -445,7 +471,7 @@ def _step_months(periods: pd.Series) -> int | None:
 def _pct_change(current: pd.Series, previous: pd.Series) -> pd.Series:
     """Темп в процентах; нулевая или отсутствующая база → null, а не бесконечность."""
     base = previous.replace(0, np.nan)
-    return ((current - base) / base * 100).round(2)
+    return (current - base) / base * 100
 
 
 def _yoy_pct(work: pd.DataFrame, value_col: str, period_col: str) -> pd.Series | None:
@@ -502,14 +528,13 @@ def robust_z(values: pd.Series) -> pd.Series:
     if len(clean) < 50:
         median = clean.median()
         mad = (clean - median).abs().median()
-        if mad == 0:
-            std = clean.std(ddof=0)
-            if std == 0:
-                # Константный ряд: отклонений нет, но пропуски остаются пропусками.
-                return values.where(values.isna(), 0.0)
-            return (values - clean.mean()) / std
-        return 0.6745 * (values - median) / mad
-    return (values - clean.mean()) / clean.std(ddof=0)
+        if mad > 0:
+            return 0.6745 * (values - median) / mad
+    std = clean.std(ddof=0)
+    if std == 0:
+        # Константный ряд: отклонений нет, но пропуски остаются пропусками.
+        return values.where(values.isna(), 0.0)
+    return (values - clean.mean()) / std
 
 
 def macro_anomalies(df: pd.DataFrame, value_col: str = "value_mln_rub",
@@ -533,11 +558,13 @@ def macro_anomalies(df: pd.DataFrame, value_col: str = "value_mln_rub",
 def _permutation_p(x: np.ndarray, y: np.ndarray, observed: float,
                    iterations: int = 2000, seed: int = 42) -> float:
     rng = np.random.default_rng(seed)
-    count = 0
-    for _ in range(iterations):
-        shuffled = rng.permutation(y)
-        if abs(np.corrcoef(x, shuffled)[0, 1]) >= abs(observed):
-            count += 1
+    x_std = (x - x.mean()) / (x.std() * np.sqrt(len(x)))
+    y_std = (y - y.mean()) / (y.std() * np.sqrt(len(y)))
+    # Все перестановки матрицей (iterations, n); корреляции — одним матричным умножением.
+    tiled = np.broadcast_to(y_std, (iterations, len(y_std))).copy()
+    permuted = rng.permuted(tiled, axis=1)
+    corrs = np.abs(permuted @ x_std)
+    count = int(np.sum(corrs >= abs(observed)))
     return (count + 1) / (iterations + 1)
 
 
@@ -623,6 +650,12 @@ def _infer_step(periods: pd.Series) -> pd.DateOffset:
     days = _median_step_days(periods) or 30.0
     if days >= 300:
         return pd.DateOffset(years=1)
+    if days >= 170:
+        return pd.DateOffset(months=6)
     if days >= 80:
         return pd.DateOffset(months=3)
+    if days <= 2:
+        return pd.DateOffset(days=1)
+    if days <= 10:
+        return pd.DateOffset(weeks=1)
     return pd.DateOffset(months=1)

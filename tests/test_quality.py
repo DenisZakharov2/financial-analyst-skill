@@ -110,7 +110,7 @@ def test_dpd_bucket_check_ignores_missing_dpd():
         "account_id": ["A1", "A2"],
         "client_id": ["C1", "C2"],
         "balance": [10.0, 20.0],
-        "dpd": [35, np.nan],
+        "dpd": [65, np.nan],
         "par_bucket": ["60+", None],
     })
     report = validate_inputs(_tables(portfolio))

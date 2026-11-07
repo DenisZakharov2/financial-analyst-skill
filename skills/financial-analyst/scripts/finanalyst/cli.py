@@ -363,9 +363,6 @@ def run(args: argparse.Namespace) -> int:
         metrics_payload["sections"]["portfolio"] = {
             "totals": result["totals"], "rows": records(frame),
         }
-        if result["totals"].get("excluded_total_rows"):
-            warnings.append("Портфель: итоговые строки product_code=ALL исключены из сумм — "
-                            f"{result['totals']['excluded_total_rows']} шт.")
         total_balance = result["totals"]["total_balance"]
         headline.append(headline_row("Остаток по портфелю", total_balance / 1e6, "млн руб.",
                                      "portfolio.balance", digits=1))
@@ -378,12 +375,14 @@ def run(args: argparse.Namespace) -> int:
         if chart:
             charts["Портфель по типам продуктов"] = chart
 
+
     # --- Воронка ----------------------------------------------------------
     funnel_source = tables.get("funnel_events")
     funnel_column = "stage"
     if funnel_source is None and tables.get("sales") is not None:
         funnel_source = tables["sales"]
         funnel_column = "funnel_stage"
+    funnel_source_name = "funnel_events" if funnel_source is tables.get("funnel_events") else "sales"
     if funnel_source is not None and funnel_column in funnel_source.columns:
         funnel = funnel_summary(funnel_source, funnel_column)
         sections.append(("Воронка продаж", funnel["rows"], funnel["assumption"]))
@@ -395,9 +394,9 @@ def run(args: argparse.Namespace) -> int:
         }
         last = funnel["rows"].iloc[-1]
         headline.append(headline_row("Сквозная конверсия", last["from_start_pct"], "%",
-                                     "funnel_events"))
+                                     funnel_source_name))
         headline.append(headline_row("Участников воронки", funnel["entities"], funnel["entity"],
-                                     "funnel_events", digits=0))
+                                     funnel_source_name, digits=0))
         chart = chart_funnel(funnel["rows"], charts_dir / "funnel.png")
         if chart:
             charts["Воронка продаж"] = chart
@@ -405,14 +404,11 @@ def run(args: argparse.Namespace) -> int:
     # --- Финансы и юнит-экономика ----------------------------------------
     finance = tables.get("finance")
     if finance is not None and not finance.empty:
-        fin = finance_summary(finance, portfolio)
+        fin = finance_summary(finance, portfolio, products)
         sections.append(("Финансовые показатели", fin["rows"], "Выручка = проценты + комиссии + премии; "
                                                             "прямые расходы = фондирование + резервы."))
         totals = fin["totals"]
         metrics_payload["sections"]["finance"] = {"totals": totals, "rows": records(fin["rows"])}
-        if totals.get("excluded_total_rows"):
-            warnings.append("Финансы: итоговые строки product_code=ALL исключены из сумм — "
-                            f"{totals['excluded_total_rows']} шт.")
         headline.append(headline_row("Выручка", totals["revenue"] / 1e6, "млн руб.", "finance",
                                      digits=1))
         if totals.get("margin_pct") is not None:
@@ -435,7 +431,9 @@ def run(args: argparse.Namespace) -> int:
                          f"Срок жизни клиента: {unit['lifetime_months']:.0f} мес."))
         metrics_payload["sections"]["unit_economics"] = unit
         if unit["ltv_cac"] is not None:
-            headline.append(headline_row("LTV / CAC", unit["ltv_cac"], "x", "finance, portfolio"))
+            client_src = unit.get("client_source", "нет данных")
+            ltv_source = f"finance, {client_src.split('.')[0]}" if "." in client_src else "finance, portfolio"
+            headline.append(headline_row("LTV / CAC", unit["ltv_cac"], "x", ltv_source))
 
     # --- Макро ------------------------------------------------------------
     indicator = None
@@ -541,7 +539,8 @@ def run(args: argparse.Namespace) -> int:
         dynamics = macro_dynamics(totals, value_col=value_col)
         view = dynamics.tail(36).assign(
             period_start=lambda d: period_labels(d["period_start"]))
-        sections.append((f"{title}: динамика", view[["period_start", value_col, "change_pct"]], ""))
+        cols = [c for c in ("period_start", value_col, "change_pct", "yoy_pct") if c in view.columns]
+        sections.append((f"{title}: динамика", view[cols], ""))
         anomalies = macro_anomalies(table, value_col=value_col,
                                     group_cols=(group_col,) if group_col else ())
         if not anomalies.empty:
@@ -585,7 +584,7 @@ def run(args: argparse.Namespace) -> int:
         sections=sections,
         quality=quality_frame(quality),
         charts=charts,
-        meta={"data_dir": data_dir.name, "version": __version__},
+        meta=dict(metrics_payload["meta"]),
     )
     created = write_reports(report, out_dir, [f for f in formats if f != "html"])
 

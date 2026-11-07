@@ -63,26 +63,19 @@ def _parse_sheet(raw: pd.DataFrame, sheet: str, source: str) -> pd.DataFrame:
     if data.empty:
         return pd.DataFrame()
 
-    rows = []
-    for _, row in data.iterrows():
-        period = row[period_column]
-        if isinstance(period, float) and np.isnan(period):
-            continue
-        for column in data.columns[1:]:
-            value = row[column]
-            number = pd.to_numeric(value, errors="coerce")
-            if pd.isna(number):
-                continue
-            rows.append({
-                "period": period,
-                "industry": sheet,
-                "indicator": column,
-                "value": float(number),
-                "unit": "значение показателя",
-                "source_file": source,
-                "source_sheet": sheet,
-            })
-    return pd.DataFrame(rows)
+    melted = data.melt(id_vars=[period_column], var_name="indicator",
+                       value_name="value")
+    melted["value"] = pd.to_numeric(melted["value"], errors="coerce")
+    melted = melted.dropna(subset=["value", period_column])
+    melted = melted.assign(
+        period=melted[period_column],
+        industry=sheet,
+        unit="значение показателя",
+        source_file=source,
+        source_sheet=sheet,
+    )
+    return melted[["period", "industry", "indicator", "value", "unit",
+                   "source_file", "source_sheet"]].copy()
 
 
 def parse_workbook(path: Path) -> pd.DataFrame:

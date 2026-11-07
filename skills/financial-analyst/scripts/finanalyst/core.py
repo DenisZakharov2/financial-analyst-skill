@@ -67,8 +67,9 @@ class DataLoadError(RuntimeError):
 # --------------------------------------------------------------------------
 
 MONTHS_RU = {
-    "январ": 1, "феврал": 2, "март": 3, "апрел": 4, "ма": 5, "июн": 6,
-    "июл": 7, "август": 8, "сентябр": 9, "октябр": 10, "ноябр": 11, "декабр": 12,
+    "январ": 1, "феврал": 2, "март": 3, "апрел": 4,
+    "май": 5, "мая": 5, "мае": 5,
+    "июн": 6, "июл": 7, "август": 8, "сентябр": 9, "октябр": 10, "ноябр": 11, "декабр": 12,
 }
 
 
@@ -356,8 +357,8 @@ def validate_inputs(tables: dict[str, pd.DataFrame]) -> QualityReport:
             # и он уже отдельно отмечен проверкой portfolio_dpd_missing.
             known = dpd.notna()
             bucket = portfolio.loc[known, "par_bucket"].astype(str).str.strip()
-            expected = pd.cut(dpd[known], [-1, 0, 30, 60, 10**9],
-                              labels=["current", "30+", "60+", "90+"])
+            expected = pd.cut(dpd[known], [0, 30, 60, 90, float("inf")],
+                              labels=["current", "30+", "60+", "90+"], right=False)
             mismatched = int((bucket != expected.astype(str)).sum())
             report.add("portfolio_dpd_bucket_consistent", mismatched == 0,
                        f"Несогласованных строк dpd/par_bucket: {mismatched}", warn_only=True)

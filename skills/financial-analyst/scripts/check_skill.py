@@ -25,7 +25,7 @@ def read_frontmatter(text: str) -> dict[str, str]:
         raise ValueError("Не найден закрывающий ---")
     result: dict[str, str] = {}
     for line in text[3:end].splitlines():
-        match = re.match(r"^([a-z_]+):\s*(.+)$", line)
+        match = re.match(r"^([a-z0-9_-]+):\s*(.+)$", line)
         if match:
             result[match[1]] = match[2].strip().strip('"')
     return result
@@ -83,7 +83,10 @@ def main() -> int:
         if not (SKILL_DIR / link).exists():
             errors.append(f"битая ссылка: {link}")
 
+    self_path = Path(__file__).resolve()
     for path in SKILL_DIR.rglob("*"):
+        if path == self_path:
+            continue
         if not path.is_file() or path.suffix not in {".md", ".py", ".tmpl", ".csv"}:
             continue
         content = path.read_text(encoding="utf-8", errors="ignore")
