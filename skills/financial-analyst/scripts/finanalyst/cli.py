@@ -281,7 +281,6 @@ def run(args: argparse.Namespace) -> int:
     # и клиентские книги. С --adapter cbr разбираем любую книгу, которая читается.
     survey_paths = ([path for path in workbook_paths if path.name.lower().startswith("stat_")]
                     if args.adapter == "auto" else workbook_paths)
-    survey_file: Path | None = None
     if args.adapter in {"auto", "cbr"}:
         for path in survey_paths:
             survey = cbr_survey.parse_workbook(path)
@@ -289,7 +288,6 @@ def run(args: argparse.Namespace) -> int:
                 continue
             survey = normalize_periods(survey)
             tables["macro_survey"] = survey
-            survey_file = path
             count = f"{len(survey):,}".replace(",", " ")
             notes.append(f"Выгрузка {path.name}: {count} строк, "
                          f"{survey['industry'].nunique()} отраслей, "

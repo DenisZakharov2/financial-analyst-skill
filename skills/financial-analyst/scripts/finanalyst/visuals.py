@@ -489,8 +489,9 @@ def build_dashboard(survey: pd.DataFrame, indicator: str, path: Path,
         "summary": summary,
     }
 
-    from plotly.offline import get_plotlyjs
     import html
+
+    from plotly.offline import get_plotlyjs
 
     safe_title = html.escape(title)
     safe_indicator = html.escape(indicator)
