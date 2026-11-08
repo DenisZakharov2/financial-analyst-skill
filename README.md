@@ -28,7 +28,7 @@ market statistics, anomaly detection and trend forecasting with reproducible rep
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
+source .venv/bin/activate # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
 python skills/financial-analyst/scripts/analyze.py \
@@ -59,14 +59,14 @@ ln -s ~/financial-analyst-skill/skills/financial-analyst ~/.hermes/skills/financ
 
 ```
 skills/financial-analyst/
-├── SKILL.md                  # процесс, ограничения, проверка
-├── references/               # формулы, схемы, контракты, гайды
+├── SKILL.md # процесс, ограничения, проверка
+├── references/ # формулы, схемы, контракты, гайды
 ├── scripts/
-│   ├── analyze.py            # CLI
-│   ├── check_skill.py        # самопроверка скилла
-│   └── finanalyst/           # ядро: метрики, графики, отчёты
-├── templates/                # бриф, постановка задачи, каркас отчёта
-└── assets/sample/            # синтетическая выгрузка для запуска
+│ ├── analyze.py # CLI
+│ ├── check_skill.py # самопроверка скилла
+│ └── finanalyst/ # ядро: метрики, графики, отчёты
+├── templates/ # бриф, постановка задачи, каркас отчёта
+└── assets/sample/ # синтетическая выгрузка для запуска
 ```
 
 ## Входные данные
