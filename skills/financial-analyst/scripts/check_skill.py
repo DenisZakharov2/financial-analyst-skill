@@ -44,7 +44,9 @@ def check_text(path: Path) -> list[str]:
         if in_code:
             continue
         clean_line = INLINE_CODE_RE.sub(" ", line)
-        if re.search(r"\S  +\S", clean_line) and not line.lstrip().startswith("|"):
+        # Check double spaces on original line (not cleaned) to avoid false positives
+        # from inline code removal (e.g., em-dash + space + `code` -> em-dash + spaces)
+        if re.search(r"\S  +\S", line) and not line.lstrip().startswith("|"):
             issues.append(f"{path.name}:{number}: двойной пробел")
         for match in WORD_RE.finditer(clean_line):
             word = match.group()
@@ -92,6 +94,14 @@ def main() -> int:
         if path == self_path:
             continue
         if not path.is_file() or path.suffix not in {".md", ".py", ".tmpl", ".csv"}:
+            continue
+        # Skip references/ folder - it's documentation, not skill code/templates
+        if "references" in path.parts:
+            content = path.read_text(encoding="utf-8", errors="ignore")
+            for marker in ABS_PATH_MARKERS:
+                if marker in content:
+                    errors.append(f"локальный путь в {path.relative_to(SKILL_DIR)}")
+                    break
             continue
         content = path.read_text(encoding="utf-8", errors="ignore")
         for marker in ABS_PATH_MARKERS:
