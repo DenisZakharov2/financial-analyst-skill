@@ -28,10 +28,4 @@ def normalize(tables: dict[str, pd.DataFrame]) -> tuple[dict[str, pd.DataFrame],
         work.columns = [str(column).strip().lower() for column in work.columns]
         result[key] = work
 
-    for table, columns in REQUIRED_COLUMNS.items():
-        if table not in result:
-            continue
-        missing = sorted(set(columns) - set(result[table].columns))
-        if missing:
-            notes.append(f"{table}: нет колонок {', '.join(missing)} — раздел будет пропущен.")
     return result, notes

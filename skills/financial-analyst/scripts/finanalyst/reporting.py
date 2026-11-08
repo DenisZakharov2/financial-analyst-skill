@@ -705,6 +705,9 @@ ALLOWED_LATIN = {
     "rmse", "arima", "ets", "csv", "excel", "json", "pdf", "docx", "xlsx",
     "pptx", "rtf", "html", "python", "sql", "github", "mit", "api", "id",
     "k-means", "z-score", "b2b", "b2c", "p-value",
+    # Финансовые и валютные аббревиатуры
+    "rub", "usd", "eur", "opex", "capex", "ebitda", "pd", "lgd", "ead",
+    "stage", "plotly", "all", "null", "nan", "b2b", "b2c",
 }
 
 

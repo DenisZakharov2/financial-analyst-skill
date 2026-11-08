@@ -1,0 +1,1891 @@
+{
+  "meta": {
+    "version": "1.0.4",
+    "data_dir": "sample",
+    "adapter": "auto",
+    "generated_at": "2026-11-08T03:01:37"
+  },
+  "quality": {
+    "checks": [
+      {
+        "check_id": "portfolio_pk_unique",
+        "status": "pass",
+        "detail": "Дубли account_id: 0"
+      },
+      {
+        "check_id": "portfolio_balance_non_negative",
+        "status": "pass",
+        "detail": "Отрицательных остатков: 0"
+      },
+      {
+        "check_id": "portfolio_dpd_non_negative",
+        "status": "pass",
+        "detail": "Отрицательных dpd: 0"
+      },
+      {
+        "check_id": "portfolio_fk_clients",
+        "status": "pass",
+        "detail": "Покрытие client_id: 100.0%"
+      },
+      {
+        "check_id": "portfolio_fk_products",
+        "status": "pass",
+        "detail": "Покрытие product_code: 100.0%"
+      },
+      {
+        "check_id": "portfolio_dpd_bucket_consistent",
+        "status": "pass",
+        "detail": "Несогласованных строк dpd/par_bucket: 0"
+      },
+      {
+        "check_id": "clients_pk_unique",
+        "status": "pass",
+        "detail": "Дубли client_id: 0"
+      },
+      {
+        "check_id": "products_pk_unique",
+        "status": "pass",
+        "detail": "Дубли product_code: 0"
+      },
+      {
+        "check_id": "sales_pk_unique",
+        "status": "pass",
+        "detail": "Строк на заявку больше одной: 0 (нужно для TAT и воронки)"
+      },
+      {
+        "check_id": "sales_amount_non_negative",
+        "status": "pass",
+        "detail": "Отрицательные суммы в заявках"
+      },
+      {
+        "check_id": "finance_grain_unique",
+        "status": "pass",
+        "detail": "Дублей period+product_code: 0"
+      },
+      {
+        "check_id": "finance_periods_parsed",
+        "status": "pass",
+        "detail": "Неразобранных периодов: 0"
+      }
+    ],
+    "failed": 0,
+    "warned": 0
+  },
+  "assumptions": [
+    "Этап заявки — максимальный достигнутый; прогрессия восстанавливается по application_id.",
+    "Срок жизни клиента принят 24 мес. (параметр lifetime_months).",
+    "ARPU — выручка за месяц на активного клиента; периодов в данных: 6.",
+    "Активные клиенты: portfolio.client_id; ARPU считается на активного клиента.",
+    "CAC = расходы на привлечение / новые клиенты за период (52 чел. со счётом в портфеле)."
+  ],
+  "warnings": [],
+  "sections": {
+    "portfolio": {
+      "totals": {
+        "accounts": 120,
+        "clients": 52,
+        "total_balance": 16969410.19,
+        "total_limit": 15650000.0,
+        "par30_pct": 0.9200113513196889,
+        "par60_pct": 0.9200113513196889,
+        "par90_pct": 0.05410317681760275,
+        "top10_clients_share_pct": 43.09826274521802,
+        "excluded_total_rows": 0
+      },
+      "rows": [
+        {
+          "product_type": "вклад",
+          "accounts": 33,
+          "clients": 28,
+          "total_balance": 5009180.08,
+          "total_limit": null,
+          "avg_balance": 151793.33575757575,
+          "avg_limit": null,
+          "avg_dpd": 0.0,
+          "par30_pct": 0.0,
+          "par60_pct": 0.0,
+          "par90_pct": 0.0
+        },
+        {
+          "product_type": "кредит_потребительский",
+          "accounts": 29,
+          "clients": 21,
+          "total_balance": 3602426.98,
+          "total_limit": 7450000.0,
+          "avg_balance": 124221.62,
+          "avg_limit": 256896.55172413794,
+          "avg_dpd": 3.2758620689655173,
+          "par30_pct": 0.25,
+          "par60_pct": 0.25,
+          "par90_pct": 0.25
+        },
+        {
+          "product_type": "кредитная_карта",
+          "accounts": 31,
+          "clients": 26,
+          "total_balance": 3888381.7,
+          "total_limit": 8200000.0,
+          "avg_balance": 125431.6677419355,
+          "avg_limit": 264516.12903225806,
+          "avg_dpd": 2.096774193548387,
+          "par30_pct": 3.78,
+          "par60_pct": 3.78,
+          "par90_pct": 0.0
+        },
+        {
+          "product_type": "страхование",
+          "accounts": 27,
+          "clients": 22,
+          "total_balance": 4469421.43,
+          "total_limit": null,
+          "avg_balance": 165534.12703703702,
+          "avg_limit": null,
+          "avg_dpd": 0.0,
+          "par30_pct": 0.0,
+          "par60_pct": 0.0,
+          "par90_pct": 0.0
+        }
+      ]
+    },
+    "funnel": {
+      "rows": [
+        {
+          "stage": "лид",
+          "reached": 200,
+          "from_start_pct": 100.0,
+          "stage_pct": null,
+          "lost": null
+        },
+        {
+          "stage": "обращение",
+          "reached": 157,
+          "from_start_pct": 78.5,
+          "stage_pct": 78.5,
+          "lost": 43.0
+        },
+        {
+          "stage": "заявка",
+          "reached": 132,
+          "from_start_pct": 66.0,
+          "stage_pct": 84.08,
+          "lost": 25.0
+        },
+        {
+          "stage": "одобрение",
+          "reached": 103,
+          "from_start_pct": 51.5,
+          "stage_pct": 78.03,
+          "lost": 29.0
+        },
+        {
+          "stage": "договор",
+          "reached": 70,
+          "from_start_pct": 35.0,
+          "stage_pct": 67.96,
+          "lost": 33.0
+        },
+        {
+          "stage": "активация",
+          "reached": 54,
+          "from_start_pct": 27.0,
+          "stage_pct": 77.14,
+          "lost": 16.0
+        }
+      ],
+      "entities": 200,
+      "assumption": "Этап заявки — максимальный достигнутый; прогрессия восстанавливается по application_id."
+    },
+    "finance": {
+      "totals": {
+        "revenue": 2729206.9699999997,
+        "direct_costs": 1146266.9100000001,
+        "gross_margin": 1582940.06,
+        "opex": 491257.25,
+        "contribution": 1091682.81,
+        "margin_pct": 58.0,
+        "margin_ratio": 0.5800000063754784,
+        "marketing_cost": 109168.28,
+        "excluded_total_rows": 0,
+        "nim_pct": 29.15,
+        "nim_months": 6
+      },
+      "rows": [
+        {
+          "period": "2024-01",
+          "product_code": "CC-01",
+          "revenue": 71944.19,
+          "direct_costs": 30216.55,
+          "gross_margin": 41727.64,
+          "contribution": 28777.69,
+          "opex": 12949.95,
+          "margin_pct": 58.0000136216698
+        },
+        {
+          "period": "2024-01",
+          "product_code": "KR-01",
+          "revenue": 133035.09,
+          "direct_costs": 55874.74,
+          "gross_margin": 77160.35,
+          "contribution": 53214.030000000006,
+          "opex": 23946.32,
+          "margin_pct": 57.99999834630098
+        },
+        {
+          "period": "2024-01",
+          "product_code": "SC-01",
+          "revenue": 55880.39,
+          "direct_costs": 23469.77,
+          "gross_margin": 32410.62,
+          "contribution": 22352.15,
+          "opex": 10058.47,
+          "margin_pct": 57.999988904873426
+        },
+        {
+          "period": "2024-01",
+          "product_code": "VD-01",
+          "revenue": 73905.57,
+          "direct_costs": 31040.34,
+          "gross_margin": 42865.23000000001,
+          "contribution": 29562.23000000001,
+          "opex": 13303.0,
+          "margin_pct": 57.99999918815322
+        },
+        {
+          "period": "2024-02",
+          "product_code": "CC-01",
+          "revenue": 191568.08,
+          "direct_costs": 80458.6,
+          "gross_margin": 111109.47999999998,
+          "contribution": 76627.22999999998,
+          "opex": 34482.25,
+          "margin_pct": 57.999996659151144
+        },
+        {
+          "period": "2024-02",
+          "product_code": "KR-01",
+          "revenue": 100678.11,
+          "direct_costs": 42284.81,
+          "gross_margin": 58393.3,
+          "contribution": 40271.240000000005,
+          "opex": 18122.06,
+          "margin_pct": 57.99999622559462
+        },
+        {
+          "period": "2024-02",
+          "product_code": "SC-01",
+          "revenue": 65268.75,
+          "direct_costs": 27412.870000000003,
+          "gross_margin": 37855.88,
+          "contribution": 26107.509999999995,
+          "opex": 11748.37,
+          "margin_pct": 58.00000766063391
+        },
+        {
+          "period": "2024-02",
+          "product_code": "VD-01",
+          "revenue": 78437.91,
+          "direct_costs": 32943.92,
+          "gross_margin": 45493.990000000005,
+          "contribution": 31375.170000000006,
+          "opex": 14118.82,
+          "margin_pct": 58.00000280476622
+        },
+        {
+          "period": "2024-03",
+          "product_code": "CC-01",
+          "revenue": 147821.11,
+          "direct_costs": 62084.869999999995,
+          "gross_margin": 85736.23999999999,
+          "contribution": 59128.43999999999,
+          "opex": 26607.8,
+          "margin_pct": 57.99999742932521
+        },
+        {
+          "period": "2024-03",
+          "product_code": "KR-01",
+          "revenue": 119172.36,
+          "direct_costs": 50052.38,
+          "gross_margin": 69119.98000000001,
+          "contribution": 47668.96000000001,
+          "opex": 21451.02,
+          "margin_pct": 58.0000093981524
+        },
+        {
+          "period": "2024-03",
+          "product_code": "SC-01",
+          "revenue": 157277.2,
+          "direct_costs": 66056.42,
+          "gross_margin": 91220.78000000001,
+          "contribution": 62910.88000000001,
+          "opex": 28309.9,
+          "margin_pct": 58.000002543280274
+        },
+        {
+          "period": "2024-03",
+          "product_code": "VD-01",
+          "revenue": 51751.39,
+          "direct_costs": 21735.59,
+          "gross_margin": 30015.8,
+          "contribution": 20700.55,
+          "opex": 9315.25,
+          "margin_pct": 57.999988019645464
+        },
+        {
+          "period": "2024-04",
+          "product_code": "CC-01",
+          "revenue": 88501.89,
+          "direct_costs": 37170.79,
+          "gross_margin": 51331.1,
+          "contribution": 35400.759999999995,
+          "opex": 15930.34,
+          "margin_pct": 58.00000429369362
+        },
+        {
+          "period": "2024-04",
+          "product_code": "KR-01",
+          "revenue": 167083.69,
+          "direct_costs": 70175.15,
+          "gross_margin": 96908.54000000001,
+          "contribution": 66833.47,
+          "opex": 30075.07,
+          "margin_pct": 57.99999988029951
+        },
+        {
+          "period": "2024-04",
+          "product_code": "SC-01",
+          "revenue": 130337.15,
+          "direct_costs": 54741.6,
+          "gross_margin": 75595.54999999999,
+          "contribution": 52134.859999999986,
+          "opex": 23460.69,
+          "margin_pct": 58.00000230172287
+        },
+        {
+          "period": "2024-04",
+          "product_code": "VD-01",
+          "revenue": 123290.87,
+          "direct_costs": 51782.16,
+          "gross_margin": 71508.70999999999,
+          "contribution": 49316.34999999999,
+          "opex": 22192.36,
+          "margin_pct": 58.00000437988636
+        },
+        {
+          "period": "2024-05",
+          "product_code": "CC-01",
+          "revenue": 118579.68,
+          "direct_costs": 49803.47,
+          "gross_margin": 68776.20999999999,
+          "contribution": 47431.869999999995,
+          "opex": 21344.34,
+          "margin_pct": 57.999996289414845
+        },
+        {
+          "period": "2024-05",
+          "product_code": "KR-01",
+          "revenue": 151397.28,
+          "direct_costs": 63586.86,
+          "gross_margin": 87810.42,
+          "contribution": 60558.91,
+          "opex": 27251.51,
+          "margin_pct": 57.999998414766765
+        },
+        {
+          "period": "2024-05",
+          "product_code": "SC-01",
+          "revenue": 169680.89,
+          "direct_costs": 71265.97,
+          "gross_margin": 98414.92000000001,
+          "contribution": 67872.36000000002,
+          "opex": 30542.56,
+          "margin_pct": 58.00000223949792
+        },
+        {
+          "period": "2024-05",
+          "product_code": "VD-01",
+          "revenue": 198506.77,
+          "direct_costs": 83372.84,
+          "gross_margin": 115133.93,
+          "contribution": 79402.70999999999,
+          "opex": 35731.22,
+          "margin_pct": 58.00000171278793
+        },
+        {
+          "period": "2024-06",
+          "product_code": "CC-01",
+          "revenue": 60365.28,
+          "direct_costs": 25353.42,
+          "gross_margin": 35011.86,
+          "contribution": 24146.11,
+          "opex": 10865.75,
+          "margin_pct": 57.99999602420465
+        },
+        {
+          "period": "2024-06",
+          "product_code": "KR-01",
+          "revenue": 124220.33,
+          "direct_costs": 52172.54,
+          "gross_margin": 72047.79000000001,
+          "contribution": 49688.130000000005,
+          "opex": 22359.66,
+          "margin_pct": 57.999998872970316
+        },
+        {
+          "period": "2024-06",
+          "product_code": "SC-01",
+          "revenue": 65359.84,
+          "direct_costs": 27451.129999999997,
+          "gross_margin": 37908.71,
+          "contribution": 26143.94,
+          "opex": 11764.77,
+          "margin_pct": 58.00000428397622
+        },
+        {
+          "period": "2024-06",
+          "product_code": "VD-01",
+          "revenue": 85143.15,
+          "direct_costs": 35760.119999999995,
+          "gross_margin": 49383.03,
+          "contribution": 34057.259999999995,
+          "opex": 15325.77,
+          "margin_pct": 58.000003523477815
+        }
+      ]
+    },
+    "unit_economics": {
+      "revenue": 2729206.9699999997,
+      "months": 6,
+      "active_clients": 52,
+      "new_clients": 52,
+      "cac_base": 52,
+      "arpu": 8747.458237179486,
+      "margin_pct": 58.0,
+      "marketing_cost": 109168.28,
+      "cac": 2099.39,
+      "lifetime_months": 24.0,
+      "ltv_gross": 121764.62,
+      "ltv_net": 119665.23,
+      "ltv_cac": 58.0,
+      "payback_months": 0.41379310344827586,
+      "assumptions": [
+        "Срок жизни клиента принят 24 мес. (параметр lifetime_months).",
+        "ARPU — выручка за месяц на активного клиента; периодов в данных: 6.",
+        "Активные клиенты: portfolio.client_id; ARPU считается на активного клиента.",
+        "CAC = расходы на привлечение / новые клиенты за период (52 чел. со счётом в портфеле)."
+      ]
+    }
+  },
+  "metrics": [
+    {
+      "section": "Портфель по типам продуктов",
+      "metric": "accounts",
+      "dimension": "вклад",
+      "value": 33
+    },
+    {
+      "section": "Портфель по типам продуктов",
+      "metric": "clients",
+      "dimension": "вклад",
+      "value": 28
+    },
+    {
+      "section": "Портфель по типам продуктов",
+      "metric": "total_balance",
+      "dimension": "вклад",
+      "value": 5009180.08
+    },
+    {
+      "section": "Портфель по типам продуктов",
+      "metric": "avg_balance",
+      "dimension": "вклад",
+      "value": 151793.33575757575
+    },
+    {
+      "section": "Портфель по типам продуктов",
+      "metric": "avg_dpd",
+      "dimension": "вклад",
+      "value": 0.0
+    },
+    {
+      "section": "Портфель по типам продуктов",
+      "metric": "par30_pct",
+      "dimension": "вклад",
+      "value": 0.0
+    },
+    {
+      "section": "Портфель по типам продуктов",
+      "metric": "par60_pct",
+      "dimension": "вклад",
+      "value": 0.0
+    },
+    {
+      "section": "Портфель по типам продуктов",
+      "metric": "par90_pct",
+      "dimension": "вклад",
+      "value": 0.0
+    },
+    {
+      "section": "Портфель по типам продуктов",
+      "metric": "accounts",
+      "dimension": "кредит_потребительский",
+      "value": 29
+    },
+    {
+      "section": "Портфель по типам продуктов",
+      "metric": "clients",
+      "dimension": "кредит_потребительский",
+      "value": 21
+    },
+    {
+      "section": "Портфель по типам продуктов",
+      "metric": "total_balance",
+      "dimension": "кредит_потребительский",
+      "value": 3602426.98
+    },
+    {
+      "section": "Портфель по типам продуктов",
+      "metric": "total_limit",
+      "dimension": "кредит_потребительский",
+      "value": 7450000.0
+    },
+    {
+      "section": "Портфель по типам продуктов",
+      "metric": "avg_balance",
+      "dimension": "кредит_потребительский",
+      "value": 124221.62
+    },
+    {
+      "section": "Портфель по типам продуктов",
+      "metric": "avg_limit",
+      "dimension": "кредит_потребительский",
+      "value": 256896.55172413794
+    },
+    {
+      "section": "Портфель по типам продуктов",
+      "metric": "avg_dpd",
+      "dimension": "кредит_потребительский",
+      "value": 3.2758620689655173
+    },
+    {
+      "section": "Портфель по типам продуктов",
+      "metric": "par30_pct",
+      "dimension": "кредит_потребительский",
+      "value": 0.25
+    },
+    {
+      "section": "Портфель по типам продуктов",
+      "metric": "par60_pct",
+      "dimension": "кредит_потребительский",
+      "value": 0.25
+    },
+    {
+      "section": "Портфель по типам продуктов",
+      "metric": "par90_pct",
+      "dimension": "кредит_потребительский",
+      "value": 0.25
+    },
+    {
+      "section": "Портфель по типам продуктов",
+      "metric": "accounts",
+      "dimension": "кредитная_карта",
+      "value": 31
+    },
+    {
+      "section": "Портфель по типам продуктов",
+      "metric": "clients",
+      "dimension": "кредитная_карта",
+      "value": 26
+    },
+    {
+      "section": "Портфель по типам продуктов",
+      "metric": "total_balance",
+      "dimension": "кредитная_карта",
+      "value": 3888381.7
+    },
+    {
+      "section": "Портфель по типам продуктов",
+      "metric": "total_limit",
+      "dimension": "кредитная_карта",
+      "value": 8200000.0
+    },
+    {
+      "section": "Портфель по типам продуктов",
+      "metric": "avg_balance",
+      "dimension": "кредитная_карта",
+      "value": 125431.6677419355
+    },
+    {
+      "section": "Портфель по типам продуктов",
+      "metric": "avg_limit",
+      "dimension": "кредитная_карта",
+      "value": 264516.12903225806
+    },
+    {
+      "section": "Портфель по типам продуктов",
+      "metric": "avg_dpd",
+      "dimension": "кредитная_карта",
+      "value": 2.096774193548387
+    },
+    {
+      "section": "Портфель по типам продуктов",
+      "metric": "par30_pct",
+      "dimension": "кредитная_карта",
+      "value": 3.78
+    },
+    {
+      "section": "Портфель по типам продуктов",
+      "metric": "par60_pct",
+      "dimension": "кредитная_карта",
+      "value": 3.78
+    },
+    {
+      "section": "Портфель по типам продуктов",
+      "metric": "par90_pct",
+      "dimension": "кредитная_карта",
+      "value": 0.0
+    },
+    {
+      "section": "Портфель по типам продуктов",
+      "metric": "accounts",
+      "dimension": "страхование",
+      "value": 27
+    },
+    {
+      "section": "Портфель по типам продуктов",
+      "metric": "clients",
+      "dimension": "страхование",
+      "value": 22
+    },
+    {
+      "section": "Портфель по типам продуктов",
+      "metric": "total_balance",
+      "dimension": "страхование",
+      "value": 4469421.43
+    },
+    {
+      "section": "Портфель по типам продуктов",
+      "metric": "avg_balance",
+      "dimension": "страхование",
+      "value": 165534.12703703702
+    },
+    {
+      "section": "Портфель по типам продуктов",
+      "metric": "avg_dpd",
+      "dimension": "страхование",
+      "value": 0.0
+    },
+    {
+      "section": "Портфель по типам продуктов",
+      "metric": "par30_pct",
+      "dimension": "страхование",
+      "value": 0.0
+    },
+    {
+      "section": "Портфель по типам продуктов",
+      "metric": "par60_pct",
+      "dimension": "страхование",
+      "value": 0.0
+    },
+    {
+      "section": "Портфель по типам продуктов",
+      "metric": "par90_pct",
+      "dimension": "страхование",
+      "value": 0.0
+    },
+    {
+      "section": "Воронка продаж",
+      "metric": "reached",
+      "dimension": "лид",
+      "value": 200
+    },
+    {
+      "section": "Воронка продаж",
+      "metric": "from_start_pct",
+      "dimension": "лид",
+      "value": 100.0
+    },
+    {
+      "section": "Воронка продаж",
+      "metric": "reached",
+      "dimension": "обращение",
+      "value": 157
+    },
+    {
+      "section": "Воронка продаж",
+      "metric": "from_start_pct",
+      "dimension": "обращение",
+      "value": 78.5
+    },
+    {
+      "section": "Воронка продаж",
+      "metric": "stage_pct",
+      "dimension": "обращение",
+      "value": 78.5
+    },
+    {
+      "section": "Воронка продаж",
+      "metric": "lost",
+      "dimension": "обращение",
+      "value": 43.0
+    },
+    {
+      "section": "Воронка продаж",
+      "metric": "reached",
+      "dimension": "заявка",
+      "value": 132
+    },
+    {
+      "section": "Воронка продаж",
+      "metric": "from_start_pct",
+      "dimension": "заявка",
+      "value": 66.0
+    },
+    {
+      "section": "Воронка продаж",
+      "metric": "stage_pct",
+      "dimension": "заявка",
+      "value": 84.08
+    },
+    {
+      "section": "Воронка продаж",
+      "metric": "lost",
+      "dimension": "заявка",
+      "value": 25.0
+    },
+    {
+      "section": "Воронка продаж",
+      "metric": "reached",
+      "dimension": "одобрение",
+      "value": 103
+    },
+    {
+      "section": "Воронка продаж",
+      "metric": "from_start_pct",
+      "dimension": "одобрение",
+      "value": 51.5
+    },
+    {
+      "section": "Воронка продаж",
+      "metric": "stage_pct",
+      "dimension": "одобрение",
+      "value": 78.03
+    },
+    {
+      "section": "Воронка продаж",
+      "metric": "lost",
+      "dimension": "одобрение",
+      "value": 29.0
+    },
+    {
+      "section": "Воронка продаж",
+      "metric": "reached",
+      "dimension": "договор",
+      "value": 70
+    },
+    {
+      "section": "Воронка продаж",
+      "metric": "from_start_pct",
+      "dimension": "договор",
+      "value": 35.0
+    },
+    {
+      "section": "Воронка продаж",
+      "metric": "stage_pct",
+      "dimension": "договор",
+      "value": 67.96
+    },
+    {
+      "section": "Воронка продаж",
+      "metric": "lost",
+      "dimension": "договор",
+      "value": 33.0
+    },
+    {
+      "section": "Воронка продаж",
+      "metric": "reached",
+      "dimension": "активация",
+      "value": 54
+    },
+    {
+      "section": "Воронка продаж",
+      "metric": "from_start_pct",
+      "dimension": "активация",
+      "value": 27.0
+    },
+    {
+      "section": "Воронка продаж",
+      "metric": "stage_pct",
+      "dimension": "активация",
+      "value": 77.14
+    },
+    {
+      "section": "Воронка продаж",
+      "metric": "lost",
+      "dimension": "активация",
+      "value": 16.0
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "revenue",
+      "dimension": "2024-01",
+      "value": 71944.19
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "direct_costs",
+      "dimension": "2024-01",
+      "value": 30216.55
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "gross_margin",
+      "dimension": "2024-01",
+      "value": 41727.64
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "contribution",
+      "dimension": "2024-01",
+      "value": 28777.69
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "opex",
+      "dimension": "2024-01",
+      "value": 12949.95
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "margin_pct",
+      "dimension": "2024-01",
+      "value": 58.0000136216698
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "revenue",
+      "dimension": "2024-01",
+      "value": 133035.09
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "direct_costs",
+      "dimension": "2024-01",
+      "value": 55874.74
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "gross_margin",
+      "dimension": "2024-01",
+      "value": 77160.35
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "contribution",
+      "dimension": "2024-01",
+      "value": 53214.030000000006
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "opex",
+      "dimension": "2024-01",
+      "value": 23946.32
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "margin_pct",
+      "dimension": "2024-01",
+      "value": 57.99999834630098
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "revenue",
+      "dimension": "2024-01",
+      "value": 55880.39
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "direct_costs",
+      "dimension": "2024-01",
+      "value": 23469.77
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "gross_margin",
+      "dimension": "2024-01",
+      "value": 32410.62
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "contribution",
+      "dimension": "2024-01",
+      "value": 22352.15
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "opex",
+      "dimension": "2024-01",
+      "value": 10058.47
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "margin_pct",
+      "dimension": "2024-01",
+      "value": 57.999988904873426
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "revenue",
+      "dimension": "2024-01",
+      "value": 73905.57
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "direct_costs",
+      "dimension": "2024-01",
+      "value": 31040.34
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "gross_margin",
+      "dimension": "2024-01",
+      "value": 42865.23000000001
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "contribution",
+      "dimension": "2024-01",
+      "value": 29562.23000000001
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "opex",
+      "dimension": "2024-01",
+      "value": 13303.0
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "margin_pct",
+      "dimension": "2024-01",
+      "value": 57.99999918815322
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "revenue",
+      "dimension": "2024-02",
+      "value": 191568.08
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "direct_costs",
+      "dimension": "2024-02",
+      "value": 80458.6
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "gross_margin",
+      "dimension": "2024-02",
+      "value": 111109.47999999998
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "contribution",
+      "dimension": "2024-02",
+      "value": 76627.22999999998
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "opex",
+      "dimension": "2024-02",
+      "value": 34482.25
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "margin_pct",
+      "dimension": "2024-02",
+      "value": 57.999996659151144
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "revenue",
+      "dimension": "2024-02",
+      "value": 100678.11
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "direct_costs",
+      "dimension": "2024-02",
+      "value": 42284.81
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "gross_margin",
+      "dimension": "2024-02",
+      "value": 58393.3
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "contribution",
+      "dimension": "2024-02",
+      "value": 40271.240000000005
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "opex",
+      "dimension": "2024-02",
+      "value": 18122.06
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "margin_pct",
+      "dimension": "2024-02",
+      "value": 57.99999622559462
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "revenue",
+      "dimension": "2024-02",
+      "value": 65268.75
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "direct_costs",
+      "dimension": "2024-02",
+      "value": 27412.870000000003
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "gross_margin",
+      "dimension": "2024-02",
+      "value": 37855.88
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "contribution",
+      "dimension": "2024-02",
+      "value": 26107.509999999995
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "opex",
+      "dimension": "2024-02",
+      "value": 11748.37
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "margin_pct",
+      "dimension": "2024-02",
+      "value": 58.00000766063391
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "revenue",
+      "dimension": "2024-02",
+      "value": 78437.91
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "direct_costs",
+      "dimension": "2024-02",
+      "value": 32943.92
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "gross_margin",
+      "dimension": "2024-02",
+      "value": 45493.990000000005
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "contribution",
+      "dimension": "2024-02",
+      "value": 31375.170000000006
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "opex",
+      "dimension": "2024-02",
+      "value": 14118.82
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "margin_pct",
+      "dimension": "2024-02",
+      "value": 58.00000280476622
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "revenue",
+      "dimension": "2024-03",
+      "value": 147821.11
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "direct_costs",
+      "dimension": "2024-03",
+      "value": 62084.869999999995
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "gross_margin",
+      "dimension": "2024-03",
+      "value": 85736.23999999999
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "contribution",
+      "dimension": "2024-03",
+      "value": 59128.43999999999
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "opex",
+      "dimension": "2024-03",
+      "value": 26607.8
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "margin_pct",
+      "dimension": "2024-03",
+      "value": 57.99999742932521
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "revenue",
+      "dimension": "2024-03",
+      "value": 119172.36
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "direct_costs",
+      "dimension": "2024-03",
+      "value": 50052.38
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "gross_margin",
+      "dimension": "2024-03",
+      "value": 69119.98000000001
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "contribution",
+      "dimension": "2024-03",
+      "value": 47668.96000000001
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "opex",
+      "dimension": "2024-03",
+      "value": 21451.02
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "margin_pct",
+      "dimension": "2024-03",
+      "value": 58.0000093981524
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "revenue",
+      "dimension": "2024-03",
+      "value": 157277.2
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "direct_costs",
+      "dimension": "2024-03",
+      "value": 66056.42
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "gross_margin",
+      "dimension": "2024-03",
+      "value": 91220.78000000001
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "contribution",
+      "dimension": "2024-03",
+      "value": 62910.88000000001
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "opex",
+      "dimension": "2024-03",
+      "value": 28309.9
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "margin_pct",
+      "dimension": "2024-03",
+      "value": 58.000002543280274
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "revenue",
+      "dimension": "2024-03",
+      "value": 51751.39
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "direct_costs",
+      "dimension": "2024-03",
+      "value": 21735.59
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "gross_margin",
+      "dimension": "2024-03",
+      "value": 30015.8
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "contribution",
+      "dimension": "2024-03",
+      "value": 20700.55
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "opex",
+      "dimension": "2024-03",
+      "value": 9315.25
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "margin_pct",
+      "dimension": "2024-03",
+      "value": 57.999988019645464
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "revenue",
+      "dimension": "2024-04",
+      "value": 88501.89
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "direct_costs",
+      "dimension": "2024-04",
+      "value": 37170.79
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "gross_margin",
+      "dimension": "2024-04",
+      "value": 51331.1
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "contribution",
+      "dimension": "2024-04",
+      "value": 35400.759999999995
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "opex",
+      "dimension": "2024-04",
+      "value": 15930.34
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "margin_pct",
+      "dimension": "2024-04",
+      "value": 58.00000429369362
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "revenue",
+      "dimension": "2024-04",
+      "value": 167083.69
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "direct_costs",
+      "dimension": "2024-04",
+      "value": 70175.15
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "gross_margin",
+      "dimension": "2024-04",
+      "value": 96908.54000000001
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "contribution",
+      "dimension": "2024-04",
+      "value": 66833.47
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "opex",
+      "dimension": "2024-04",
+      "value": 30075.07
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "margin_pct",
+      "dimension": "2024-04",
+      "value": 57.99999988029951
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "revenue",
+      "dimension": "2024-04",
+      "value": 130337.15
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "direct_costs",
+      "dimension": "2024-04",
+      "value": 54741.6
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "gross_margin",
+      "dimension": "2024-04",
+      "value": 75595.54999999999
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "contribution",
+      "dimension": "2024-04",
+      "value": 52134.859999999986
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "opex",
+      "dimension": "2024-04",
+      "value": 23460.69
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "margin_pct",
+      "dimension": "2024-04",
+      "value": 58.00000230172287
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "revenue",
+      "dimension": "2024-04",
+      "value": 123290.87
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "direct_costs",
+      "dimension": "2024-04",
+      "value": 51782.16
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "gross_margin",
+      "dimension": "2024-04",
+      "value": 71508.70999999999
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "contribution",
+      "dimension": "2024-04",
+      "value": 49316.34999999999
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "opex",
+      "dimension": "2024-04",
+      "value": 22192.36
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "margin_pct",
+      "dimension": "2024-04",
+      "value": 58.00000437988636
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "revenue",
+      "dimension": "2024-05",
+      "value": 118579.68
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "direct_costs",
+      "dimension": "2024-05",
+      "value": 49803.47
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "gross_margin",
+      "dimension": "2024-05",
+      "value": 68776.20999999999
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "contribution",
+      "dimension": "2024-05",
+      "value": 47431.869999999995
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "opex",
+      "dimension": "2024-05",
+      "value": 21344.34
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "margin_pct",
+      "dimension": "2024-05",
+      "value": 57.999996289414845
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "revenue",
+      "dimension": "2024-05",
+      "value": 151397.28
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "direct_costs",
+      "dimension": "2024-05",
+      "value": 63586.86
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "gross_margin",
+      "dimension": "2024-05",
+      "value": 87810.42
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "contribution",
+      "dimension": "2024-05",
+      "value": 60558.91
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "opex",
+      "dimension": "2024-05",
+      "value": 27251.51
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "margin_pct",
+      "dimension": "2024-05",
+      "value": 57.999998414766765
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "revenue",
+      "dimension": "2024-05",
+      "value": 169680.89
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "direct_costs",
+      "dimension": "2024-05",
+      "value": 71265.97
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "gross_margin",
+      "dimension": "2024-05",
+      "value": 98414.92000000001
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "contribution",
+      "dimension": "2024-05",
+      "value": 67872.36000000002
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "opex",
+      "dimension": "2024-05",
+      "value": 30542.56
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "margin_pct",
+      "dimension": "2024-05",
+      "value": 58.00000223949792
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "revenue",
+      "dimension": "2024-05",
+      "value": 198506.77
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "direct_costs",
+      "dimension": "2024-05",
+      "value": 83372.84
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "gross_margin",
+      "dimension": "2024-05",
+      "value": 115133.93
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "contribution",
+      "dimension": "2024-05",
+      "value": 79402.70999999999
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "opex",
+      "dimension": "2024-05",
+      "value": 35731.22
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "margin_pct",
+      "dimension": "2024-05",
+      "value": 58.00000171278793
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "revenue",
+      "dimension": "2024-06",
+      "value": 60365.28
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "direct_costs",
+      "dimension": "2024-06",
+      "value": 25353.42
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "gross_margin",
+      "dimension": "2024-06",
+      "value": 35011.86
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "contribution",
+      "dimension": "2024-06",
+      "value": 24146.11
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "opex",
+      "dimension": "2024-06",
+      "value": 10865.75
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "margin_pct",
+      "dimension": "2024-06",
+      "value": 57.99999602420465
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "revenue",
+      "dimension": "2024-06",
+      "value": 124220.33
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "direct_costs",
+      "dimension": "2024-06",
+      "value": 52172.54
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "gross_margin",
+      "dimension": "2024-06",
+      "value": 72047.79000000001
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "contribution",
+      "dimension": "2024-06",
+      "value": 49688.130000000005
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "opex",
+      "dimension": "2024-06",
+      "value": 22359.66
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "margin_pct",
+      "dimension": "2024-06",
+      "value": 57.999998872970316
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "revenue",
+      "dimension": "2024-06",
+      "value": 65359.84
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "direct_costs",
+      "dimension": "2024-06",
+      "value": 27451.129999999997
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "gross_margin",
+      "dimension": "2024-06",
+      "value": 37908.71
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "contribution",
+      "dimension": "2024-06",
+      "value": 26143.94
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "opex",
+      "dimension": "2024-06",
+      "value": 11764.77
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "margin_pct",
+      "dimension": "2024-06",
+      "value": 58.00000428397622
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "revenue",
+      "dimension": "2024-06",
+      "value": 85143.15
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "direct_costs",
+      "dimension": "2024-06",
+      "value": 35760.119999999995
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "gross_margin",
+      "dimension": "2024-06",
+      "value": 49383.03
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "contribution",
+      "dimension": "2024-06",
+      "value": 34057.259999999995
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "opex",
+      "dimension": "2024-06",
+      "value": 15325.77
+    },
+    {
+      "section": "Финансовые показатели",
+      "metric": "margin_pct",
+      "dimension": "2024-06",
+      "value": 58.000003523477815
+    },
+    {
+      "section": "Ключевые показатели",
+      "metric": "Остаток по портфелю",
+      "dimension": "млн руб.",
+      "value": 16.96941019
+    },
+    {
+      "section": "Ключевые показатели",
+      "metric": "Счетов в портфеле",
+      "dimension": "шт.",
+      "value": 120
+    },
+    {
+      "section": "Ключевые показатели",
+      "metric": "PAR 30",
+      "dimension": "%",
+      "value": 0.9200113513196889
+    },
+    {
+      "section": "Ключевые показатели",
+      "metric": "Сквозная конверсия",
+      "dimension": "%",
+      "value": 27.0
+    },
+    {
+      "section": "Ключевые показатели",
+      "metric": "Участников воронки",
+      "dimension": "заявка",
+      "value": 200
+    },
+    {
+      "section": "Ключевые показатели",
+      "metric": "Выручка",
+      "dimension": "млн руб.",
+      "value": 2.72920697
+    },
+    {
+      "section": "Ключевые показатели",
+      "metric": "Валовая маржа",
+      "dimension": "%",
+      "value": 58.0
+    },
+    {
+      "section": "Ключевые показатели",
+      "metric": "LTV / CAC",
+      "dimension": "x",
+      "value": 58.0
+    },
+    {
+      "section": "Юнит-экономика",
+      "metric": "revenue",
+      "dimension": "",
+      "value": 2729206.9699999997
+    },
+    {
+      "section": "Юнит-экономика",
+      "metric": "months",
+      "dimension": "",
+      "value": 6.0
+    },
+    {
+      "section": "Юнит-экономика",
+      "metric": "active_clients",
+      "dimension": "",
+      "value": 52.0
+    },
+    {
+      "section": "Юнит-экономика",
+      "metric": "new_clients",
+      "dimension": "",
+      "value": 52.0
+    },
+    {
+      "section": "Юнит-экономика",
+      "metric": "cac_base",
+      "dimension": "",
+      "value": 52.0
+    },
+    {
+      "section": "Юнит-экономика",
+      "metric": "arpu",
+      "dimension": "",
+      "value": 8747.458237179486
+    },
+    {
+      "section": "Юнит-экономика",
+      "metric": "margin_pct",
+      "dimension": "",
+      "value": 58.0
+    },
+    {
+      "section": "Юнит-экономика",
+      "metric": "marketing_cost",
+      "dimension": "",
+      "value": 109168.28
+    },
+    {
+      "section": "Юнит-экономика",
+      "metric": "cac",
+      "dimension": "",
+      "value": 2099.39
+    },
+    {
+      "section": "Юнит-экономика",
+      "metric": "lifetime_months",
+      "dimension": "",
+      "value": 24.0
+    },
+    {
+      "section": "Юнит-экономика",
+      "metric": "ltv_gross",
+      "dimension": "",
+      "value": 121764.62
+    },
+    {
+      "section": "Юнит-экономика",
+      "metric": "ltv_net",
+      "dimension": "",
+      "value": 119665.23
+    },
+    {
+      "section": "Юнит-экономика",
+      "metric": "ltv_cac",
+      "dimension": "",
+      "value": 58.0
+    },
+    {
+      "section": "Юнит-экономика",
+      "metric": "payback_months",
+      "dimension": "",
+      "value": 0.41379310344827586
+    }
+  ],
+  "headline": [
+    {
+      "label": "Остаток по портфелю",
+      "value": "17,0",
+      "raw": 16.96941019,
+      "digits": 1,
+      "unit": "млн руб.",
+      "source": "portfolio.balance"
+    },
+    {
+      "label": "Счетов в портфеле",
+      "value": "120",
+      "raw": 120,
+      "digits": 0,
+      "unit": "шт.",
+      "source": "portfolio.account_id"
+    },
+    {
+      "label": "PAR 30",
+      "value": "0,92",
+      "raw": 0.9200113513196889,
+      "digits": 2,
+      "unit": "%",
+      "source": "portfolio.dpd"
+    },
+    {
+      "label": "Сквозная конверсия",
+      "value": "27,00",
+      "raw": 27.0,
+      "digits": 2,
+      "unit": "%",
+      "source": "funnel_events"
+    },
+    {
+      "label": "Участников воронки",
+      "value": "200",
+      "raw": 200,
+      "digits": 0,
+      "unit": "заявка",
+      "source": "funnel_events"
+    },
+    {
+      "label": "Выручка",
+      "value": "2,7",
+      "raw": 2.72920697,
+      "digits": 1,
+      "unit": "млн руб.",
+      "source": "finance"
+    },
+    {
+      "label": "Валовая маржа",
+      "value": "58,00",
+      "raw": 58.0,
+      "digits": 2,
+      "unit": "%",
+      "source": "finance"
+    },
+    {
+      "label": "LTV / CAC",
+      "value": "58,00",
+      "raw": 58.0,
+      "digits": 2,
+      "unit": "x",
+      "source": "finance, portfolio"
+    }
+  ],
+  "notes": []
+}

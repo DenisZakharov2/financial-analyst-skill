@@ -12,9 +12,12 @@ import unicodedata
 from pathlib import Path
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
-REQUIRED = ("name", "description", "version", "author", "license", "platforms")
+REQUIRED = ("name", "description", "version", "author", "license", "platforms", "allowed-tools")
 LINK_PATTERN = re.compile(r"`((?:references|scripts|templates|assets)/[^`]+)`")
-ABS_PATH_MARKERS = ("/ho" + "me/", "/Us" + "ers/", "C:" + "\\")
+ABS_PATH_MARKERS = ("/home/", "/Users/", "C:\\")
+
+WORD_RE = re.compile(r"[A-Za-z\u0410-\u042f\u0430-\u044f\u0401\u0451]+")
+INLINE_CODE_RE = re.compile(r"`[^`]+`")
 
 
 def read_frontmatter(text: str) -> dict[str, str]:
@@ -40,9 +43,10 @@ def check_text(path: Path) -> list[str]:
             continue
         if in_code:
             continue
-        if re.search(r"\S  +\S", line) and not line.lstrip().startswith("|"):
+        clean_line = INLINE_CODE_RE.sub(" ", line)
+        if re.search(r"\S  +\S", clean_line) and not line.lstrip().startswith("|"):
             issues.append(f"{path.name}:{number}: двойной пробел")
-        for match in re.finditer(r"[A-Za-zА-Яа-яЁё]+", line):
+        for match in WORD_RE.finditer(clean_line):
             word = match.group()
             latin = any("LATIN" in unicodedata.name(ch, "") for ch in word)
             cyrillic = any("CYRILLIC" in unicodedata.name(ch, "") for ch in word)

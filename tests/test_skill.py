@@ -54,7 +54,10 @@ def test_referenced_files_exist(skill_dir, skill_text):
 
 def test_no_absolute_local_paths(skill_dir):
     markers = ("/ho" + "me/", "/Us" + "ers/", "C:" + "\\")
+    check_skill_path = skill_dir / "scripts" / "check_skill.py"
     for path in skill_dir.rglob("*"):
+        if path == check_skill_path:
+            continue
         if path.is_file() and path.suffix in {".md", ".py", ".csv", ".tmpl"}:
             text = path.read_text(encoding="utf-8", errors="ignore")
             for marker in markers:

@@ -296,6 +296,9 @@ def finance_summary(finance: pd.DataFrame, portfolio: pd.DataFrame | None = None
     if portfolio is not None and "balance" in portfolio.columns:
         # Итоговую строку product_code=ALL не суммируем с детализацией.
         clean_port, _ = drop_total_rows(portfolio, group=())
+        # Исключаем закрытые счета
+        if "status" in clean_port.columns:
+            clean_port = clean_port[clean_port["status"].astype(str).str.strip().str.lower() != "закрыт"]
         # В знаменатель NIM попадают только работающие (кредитные) активы:
         # депозиты и страхование — пассивы, не кредитные остатки.
         work_port = clean_port
@@ -369,7 +372,7 @@ def unit_economics(
     lifetime = float(lifetime_months)
     ltv_gross = (arpu * margin_ratio * lifetime) if arpu else None
     ltv_net = (ltv_gross - cac) if (ltv_gross is not None and cac is not None) else None
-    ratio = (ltv_gross / cac) if (ltv_gross is not None and cac) else None
+    ratio = (ltv_gross / cac) if (ltv_gross is not None and cac and ltv_gross > 0 and cac > 0) else None
     monthly_margin = (arpu * margin_ratio) if arpu else None
     # Отрицательная или нулевая валовая маржа означает убыток на каждого клиента:
     # привлечение не окупается, срок окупаемости и LTV/CAC не определяются.
@@ -531,7 +534,7 @@ def robust_z(values: pd.Series) -> pd.Series:
         if mad > 0:
             return 0.6745 * (values - median) / mad
     std = clean.std(ddof=0)
-    if std == 0:
+    if std == 0 or pd.isna(std):
         # Константный ряд: отклонений нет, но пропуски остаются пропусками.
         return values.where(values.isna(), 0.0)
     return (values - clean.mean()) / std
@@ -654,6 +657,8 @@ def _infer_step(periods: pd.Series) -> pd.DateOffset:
         return pd.DateOffset(months=6)
     if days >= 80:
         return pd.DateOffset(months=3)
+    if days >= 27:
+        return pd.DateOffset(months=1)
     if days <= 2:
         return pd.DateOffset(days=1)
     if days <= 10:

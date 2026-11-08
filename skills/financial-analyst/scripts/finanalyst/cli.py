@@ -269,7 +269,10 @@ def run(args: argparse.Namespace) -> int:
         (out_dir / stale).unlink(missing_ok=True)
     setup_matplotlib()
 
-    tables = load_tables(data_dir)
+    # В режиме auto/cbr книги stat_*.xlsx читает cbr_survey.parse_workbook (все листы),
+    # поэтому пропускаем их в load_tables, чтобы не читать первый лист дважды.
+    skip_patterns = ("stat_",) if args.adapter in {"auto", "cbr"} else ()
+    tables = load_tables(data_dir, skip_patterns=skip_patterns)
     notes: list[str] = []
 
     workbook_paths = sorted(path for path in data_dir.iterdir()
@@ -296,7 +299,8 @@ def run(args: argparse.Namespace) -> int:
             if args.adapter == "auto" and survey_paths:
                 notes.append("Книга stat_*.xlsx найдена, но выгрузка опросов не распознана: "
                              "проверьте строку заголовков и листы.")
-            elif args.adapter == "auto" and workbook_paths:
+            elif args.adapter == "auto" and any(p.name.lower().startswith("stat_") for p in workbook_paths):
+                # Предупреждаем только если есть файлы stat_*, но они не распознались
                 notes.append("Книга с опросами не найдена: адаптер ищет файл stat_*.xlsx. "
                              "Для файла с другим именем запустите с --adapter cbr.")
     if args.adapter == "client":
@@ -313,9 +317,9 @@ def run(args: argparse.Namespace) -> int:
             notes.append("macro_survey: нет колонки period — раздел пропущен.")
             tables.pop("macro_survey")
 
-    service = {survey_file.stem} if survey_file is not None else set()
+    # Удаляем служебные таблицы (отчёты, загруженные по ошибке)
     for key in list(tables):
-        if key in service or key.lower().startswith("отчет"):
+        if key.lower().startswith("отчет"):
             tables.pop(key)
             continue
         if key not in KNOWN_TABLES:
@@ -379,10 +383,11 @@ def run(args: argparse.Namespace) -> int:
     # --- Воронка ----------------------------------------------------------
     funnel_source = tables.get("funnel_events")
     funnel_column = "stage"
+    funnel_table_name = "funnel_events"
     if funnel_source is None and tables.get("sales") is not None:
         funnel_source = tables["sales"]
         funnel_column = "funnel_stage"
-    funnel_source_name = "funnel_events" if funnel_source is tables.get("funnel_events") else "sales"
+        funnel_table_name = "sales"
     if funnel_source is not None and funnel_column in funnel_source.columns:
         funnel = funnel_summary(funnel_source, funnel_column)
         sections.append(("Воронка продаж", funnel["rows"], funnel["assumption"]))
@@ -394,9 +399,9 @@ def run(args: argparse.Namespace) -> int:
         }
         last = funnel["rows"].iloc[-1]
         headline.append(headline_row("Сквозная конверсия", last["from_start_pct"], "%",
-                                     funnel_source_name))
+                                     funnel_table_name))
         headline.append(headline_row("Участников воронки", funnel["entities"], funnel["entity"],
-                                     funnel_source_name, digits=0))
+                                     funnel_table_name, digits=0))
         chart = chart_funnel(funnel["rows"], charts_dir / "funnel.png")
         if chart:
             charts["Воронка продаж"] = chart
@@ -453,9 +458,12 @@ def run(args: argparse.Namespace) -> int:
         industry = _pick_industry(survey, indicator)
         series = _series(survey, indicator, industry)
         # period_start может быть датой или текстом: .dt на тексте падает.
+        # Применяем macro_dynamics для расчёта change_pct и yoy_pct
+        series = macro_dynamics(series, value_col="value")
         dynamics_view = series.tail(36).assign(
             period_start=lambda d: period_labels(d["period_start"]))
-        sections.append(("Макро: динамика показателя", dynamics_view,
+        cols = [c for c in ("period_start", "value", "change_pct", "yoy_pct") if c in dynamics_view.columns]
+        sections.append(("Макро: динамика показателя", dynamics_view[cols],
                          f"Показатель: {indicator}. Отрасль: {industry}."))
         anomalies = macro_anomalies(series, value_col="value", group_cols=())
         if not anomalies.empty:

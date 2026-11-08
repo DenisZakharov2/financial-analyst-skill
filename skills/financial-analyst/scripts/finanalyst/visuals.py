@@ -490,12 +490,17 @@ def build_dashboard(survey: pd.DataFrame, indicator: str, path: Path,
     }
 
     from plotly.offline import get_plotlyjs
+    import html
 
-    html = (DASHBOARD_TEMPLATE
+    safe_title = html.escape(title)
+    safe_indicator = html.escape(indicator)
+    safe_data = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
+
+    html_out = (DASHBOARD_TEMPLATE
             .replace("__PLOTLY__", get_plotlyjs())
-            .replace("__DATA__", json.dumps(payload, ensure_ascii=False))
-            .replace("__TITLE__", title)
-            .replace("__INDICATOR__", indicator)
+            .replace("__DATA__", safe_data)
+            .replace("__TITLE__", safe_title)
+            .replace("__INDICATOR__", safe_indicator)
             .replace("__GENERATED__", pd.Timestamp.now().strftime("%d.%m.%Y %H:%M")))
-    path.write_text(html, encoding="utf-8")
+    path.write_text(html_out, encoding="utf-8")
     return path

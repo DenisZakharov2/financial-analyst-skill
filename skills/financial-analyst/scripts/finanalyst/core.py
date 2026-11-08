@@ -27,11 +27,13 @@ KNOWN_TABLES = frozenset({
 })
 
 
-def load_tables(data_dir: Path) -> dict[str, pd.DataFrame]:
+def load_tables(data_dir: Path, skip_patterns: tuple[str, ...] = ()) -> dict[str, pd.DataFrame]:
     """Прочитать все CSV/Excel из каталога. Имя файла = имя таблицы.
 
     Ошибка чтения не глотается: файл попадает в ``errors`` и возвращается
     вызывающему, чтобы CLI мог завершиться с кодом 2.
+
+    ``skip_patterns`` — префиксы имён файлов (без расширения), которые нужно пропустить.
     """
     tables: dict[str, pd.DataFrame] = {}
     errors: list[str] = []
@@ -40,6 +42,8 @@ def load_tables(data_dir: Path) -> dict[str, pd.DataFrame]:
 
     for path in sorted(data_dir.iterdir()):
         if path.suffix.lower() not in TEXT_SUFFIXES or not path.is_file():
+            continue
+        if any(path.stem.startswith(pattern) for pattern in skip_patterns):
             continue
         name = path.stem
         try:
@@ -68,7 +72,7 @@ class DataLoadError(RuntimeError):
 
 MONTHS_RU = {
     "январ": 1, "феврал": 2, "март": 3, "апрел": 4,
-    "май": 5, "мая": 5, "мае": 5,
+    "май": 5, "мая": 5, "мае": 5, "маем": 5,
     "июн": 6, "июл": 7, "август": 8, "сентябр": 9, "октябр": 10, "ноябр": 11, "декабр": 12,
 }
 
@@ -96,8 +100,8 @@ def parse_period(value) -> tuple[pd.Timestamp | pd.NaT, str]:
     """Разобрать период в дату начала и тип (D/M/Q/Y).
 
     Поддерживаются: 2026-01, 2026-01-15, 01.2026, 1к02, 1кв02, 2020 год,
-    январь 2020, даты Excel и pandas. Невозможная дата (`2024-13`,
-    `2024-02-30`) даёт ``NaT`` и пустой тип: дальше её ловит контроль качества.
+    январь 2020, даты Excel и pandas. Невозможная дата (``2024-13``,
+    ``2024-02-30``) даёт ``NaT`` и пустой тип: дальше её ловит контроль качества.
     """
     if value is None or (isinstance(value, float) and np.isnan(value)):
         return pd.NaT, ""
@@ -415,6 +419,17 @@ def validate_inputs(tables: dict[str, pd.DataFrame]) -> QualityReport:
             normalized = normalize_periods(finance)
             bad = int(normalized["period_start"].isna().sum())
             report.add("finance_periods_parsed", bad == 0, f"Неразобранных периодов: {bad}")
+        # Проверить, не записана ли в tax ставка вместо суммы (все значения в (0, 1] при выручке > 1000)
+        if "tax" in finance.columns:
+            tax_vals = pd.to_numeric(finance["tax"], errors="coerce").dropna()
+            revenue_vals = pd.to_numeric(finance.get("interest_income", 0), errors="coerce").fillna(0) + \
+                           pd.to_numeric(finance.get("fee_income", 0), errors="coerce").fillna(0)
+            total_revenue = float(revenue_vals.sum())
+            if len(tax_vals) > 0 and (tax_vals > 0).all() and (tax_vals <= 1).all() and total_revenue > 1000:
+                report.warnings.append(
+                    "В finance колонка tax выглядит как ставка (все значения в (0, 1]), "
+                    "а не сумма налога в рублях. Проверьте данные."
+                )
 
     survey = tables.get("macro_survey")
     if survey is not None:
