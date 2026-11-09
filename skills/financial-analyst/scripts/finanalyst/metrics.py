@@ -35,13 +35,14 @@ def _months_in_periods(values: pd.Series) -> int:
     Так ARPU и NIM делят поток на длительность выгрузки, а не на число строк,
     и «2024-01», «01.2024», «январь 2024», «1к2024» дают одинаковый результат.
     """
-    spans: dict[pd.Period, int] = {}
+    from .core import _period_to_ym
+    spans: dict[str, int] = {}
     for value in values:
-        start, kind = parse_period(value)
-        if pd.isna(start):
+        ym = _period_to_ym(parse_period(value))
+        if not ym:
             continue
-        month = pd.Timestamp(start).to_period("M")
-        spans[month] = max(spans.get(month, 1), PERIOD_MONTHS.get(kind, 1))
+        kind = parse_period(value)[1]
+        spans[ym] = max(spans.get(ym, 1), PERIOD_MONTHS.get(kind, 1))
     return int(sum(spans.values()))
 
 
@@ -62,25 +63,84 @@ def _new_clients(clients: pd.DataFrame | None, finance: pd.DataFrame,
                         if column in clients.columns), None)
     if date_column is None:
         return None
-    dates = pd.to_datetime(clients[date_column], errors="coerce")
-    if dates.notna().sum() == 0:
+
+    # Parse registration dates to YYYY-MM-DD strings to avoid datetime64 segfault
+    reg_dates = []
+    for val in clients[date_column]:
+        if pd.isna(val):
+            reg_dates.append("")
+            continue
+        s = str(val).strip()
+        # Try to extract YYYY-MM-DD from various formats
+        if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+            reg_dates.append(s[:10])
+        elif len(s) >= 10 and s[2] == "." and s[5] == ".":
+            # DD.MM.YYYY
+            reg_dates.append(f"{s[6:10]}-{s[3:5]}-{s[0:2]}")
+        elif len(s) >= 10 and s[2] == "/" and s[5] == "/":
+            # DD/MM/YYYY
+            reg_dates.append(f"{s[6:10]}-{s[3:5]}-{s[0:2]}")
+        else:
+            reg_dates.append("")
+
+    if not any(reg_dates):
         return None
-    parsed_periods = [
-        (start, kind)
-        for start, kind in (parse_period(value) for value in finance["period"])
-        if pd.notna(start)
-    ]
+
+    # Parse finance periods to get window boundaries
+    parsed_periods = []
+    for value in finance["period"]:
+        start, kind = parse_period(value)
+        if pd.notna(start):
+            parsed_periods.append((start, kind))
     if not parsed_periods:
         return None
-    begin = min(start for start, _ in parsed_periods)
-    end = max(
-        start + (pd.Timedelta(days=1) if kind == "D" else pd.DateOffset(months=PERIOD_MONTHS.get(kind, 1)))
-        for start, kind in parsed_periods
-    )
-    window = (dates >= begin) & (dates < end)
-    if portfolio is not None and "client_id" in portfolio.columns:
-        window &= clients["client_id"].isin(portfolio["client_id"].dropna())
-    return int(clients.loc[window, "client_id"].nunique())
+
+    # Find min start and max end as YYYY-MM-DD strings
+    # Use _period_to_ym for start, and calculate end manually
+    from .core import _period_to_ym
+
+    def period_to_end_ym(start_ts, kind):
+        """Calculate end of period as YYYY-MM string (first day of next period)."""
+        try:
+            year = int(start_ts.year)
+            month = int(start_ts.month)
+        except (AttributeError, ValueError):
+            return ""
+        months = PERIOD_MONTHS.get(kind, 1)
+        if months == 1:  # D or M
+            month += 1
+            if month > 12:
+                month = 1
+                year += 1
+        elif months == 3:  # Q
+            month += 3
+            if month > 12:
+                month -= 12
+                year += 1
+        elif months == 12:  # Y
+            year += 1
+            month = 1
+        return f"{year:04d}-{month:02d}"
+
+    begin_ym = min(_period_to_ym((s, k)) for s, k in parsed_periods)
+    end_ym = max(period_to_end_ym(s, k) for s, k in parsed_periods)
+
+    # Compare registration dates (YYYY-MM-DD) with window boundaries (YYYY-MM)
+    # Registration date is in window if begin_ym <= reg_ym < end_ym
+    count = 0
+    for i, reg_date in enumerate(reg_dates):
+        if not reg_date:
+            continue
+        reg_ym = reg_date[:7]  # YYYY-MM
+        if begin_ym <= reg_ym < end_ym:
+            # Check portfolio filter
+            if portfolio is not None and "client_id" in portfolio.columns:
+                cid = clients.iloc[i]["client_id"]
+                if pd.notna(cid) and cid in set(portfolio["client_id"].dropna()):
+                    count += 1
+            else:
+                count += 1
+    return count
 
 
 def _normalize_stage(value: str) -> str:
@@ -190,7 +250,8 @@ def funnel_summary(events: pd.DataFrame, stage_column: str = "stage") -> dict:
         raise MetricError(f"Нет колонки {stage_column!r}: {list(events.columns)}")
 
     df = events.copy()
-    df["_stage"] = df[stage_column].map(_normalize_stage)
+    # Avoid .map() which triggers segfault in pandas 2.2.3/numpy 2.1.3
+    df["_stage"] = [_normalize_stage(v) for v in df[stage_column]]
     unknown = sorted(set(df["_stage"]) - set(STAGE_ORDER))
     if unknown:
         raise MetricError(
@@ -208,7 +269,8 @@ def funnel_summary(events: pd.DataFrame, stage_column: str = "stage") -> dict:
     else:
         raise MetricError("Нужна колонка application_id или client_id")
 
-    df["_rank"] = df["_stage"].map(STAGE_RANK)
+    # Avoid .map() which triggers segfault in pandas 2.2.3/numpy 2.1.3
+    df["_rank"] = [STAGE_RANK.get(v, 0) for v in df["_stage"]]
     rank = df.groupby(entity_col)["_rank"].max()
 
     reached = {stage: int((rank >= STAGE_RANK[stage]).sum()) for stage in STAGE_ORDER}
@@ -250,7 +312,8 @@ def finance_summary(finance: pd.DataFrame, portfolio: pd.DataFrame | None = None
     df = finance.copy()
     if "period" in df.columns:
         # «2024-01», «01.2024» и «январь 2024» — один и тот же период.
-        df["period"] = df["period"].map(canonical_period)
+        # Avoid .map() which triggers segfault in pandas 2.2.3/numpy 2.1.3
+        df["period"] = [canonical_period(v) for v in df["period"]]
     for column in ("interest_income", "fee_income", "premium", "funding_cost",
                    "reserve_expense", "opex", "tax", "marketing_cost"):
         if column in df.columns:
@@ -493,7 +556,9 @@ def _yoy_pct(work: pd.DataFrame, value_col: str, period_col: str) -> pd.Series |
         return None
     shifted = lookup.reindex(lookup.index - pd.DateOffset(months=12))
     previous = pd.Series(shifted.to_numpy(), index=lookup.index)
-    return _pct_change(work[value_col].astype("float64"), dates.map(previous))
+    # Avoid .map() which triggers segfault in pandas 2.2.3/numpy 2.1.3
+    previous_mapped = np.array([previous.get(d, np.nan) for d in dates], dtype="float64")
+    return _pct_change(work[value_col].astype("float64"), pd.Series(previous_mapped, index=work.index))
 
 
 def macro_dynamics(series: pd.DataFrame, value_col: str = "value_mln_rub",

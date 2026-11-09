@@ -96,6 +96,22 @@ def _typed(timestamp: pd.Timestamp | pd.NaT, kind: str) -> tuple[pd.Timestamp | 
     return timestamp, kind
 
 
+def _period_to_ym(period_tuple: tuple[pd.Timestamp | pd.NaT, str]) -> str:
+    """Convert parse_period result to YYYY-MM string without pandas datetime ops."""
+    start, _ = period_tuple
+    if pd.isna(start):
+        return ""
+    # Use year/month attributes directly to avoid strftime/to_period segfault
+    try:
+        return f"{int(start.year):04d}-{int(start.month):02d}"
+    except (AttributeError, ValueError):
+        # Fallback: try to extract from string representation
+        s = str(start)
+        if len(s) >= 7 and s[4] == "-":
+            return s[:7]
+        return ""
+
+
 def parse_period(value) -> tuple[pd.Timestamp | pd.NaT, str]:
     """Разобрать период в дату начала и тип (D/M/Q/Y).
 
@@ -154,12 +170,8 @@ def parse_period(value) -> tuple[pd.Timestamp | pd.NaT, str]:
         if month:
             return _typed(_timestamp(year, month, 1), "M")
 
-    try:
-        parsed = pd.to_datetime(text, errors="coerce", dayfirst=True)
-    except (TypeError, ValueError):  # pandas может бросить на экзотическом вводе
-        return pd.NaT, ""
-    if pd.notna(parsed):
-        return pd.Timestamp(parsed).normalize(), "D"
+    # Отключаем pd.to_datetime фоллбэк — он вызывает segfault в pandas 2.2.3/numpy 2.1.3
+    # на datetime64[ns] C-extensions. Если формат не распознан, возвращаем NaT.
     return pd.NaT, ""
 
 
@@ -169,19 +181,25 @@ def canonical_period(value) -> str:
     Нужно, чтобы «2024-01», «01.2024» и «январь 2024» не расходились по разным
     строкам одной и той же таблицы.
     """
-    start, _ = parse_period(value)
-    if pd.isna(start):
-        return str(value)
-    return pd.Timestamp(start).strftime("%Y-%m")
+    # Быстрая проверка: если уже в формате YYYY-MM, вернуть как есть
+    if isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}", value):
+        return value
+    return _period_to_ym(parse_period(value))
 
 
 def normalize_periods(df: pd.DataFrame, column: str = "period") -> pd.DataFrame:
-    """Добавить period_start и period_type, отсортировать по дате."""
+    """Добавить period_start (строка YYYY-MM) и period_type, отсортировать по дате."""
     if column not in df.columns:
         return df.copy()
     result = df.copy()
-    pairs = result[column].map(parse_period)
-    result["period_start"] = [p[0] for p in pairs]
+    # Avoid .map() which triggers segfault in pandas 2.2.3/numpy 2.1.3
+    pairs = [parse_period(v) for v in result[column]]
+    # Храним period_start как строку YYYY-MM, а не Timestamp,
+    # чтобы избежать segfault в pandas 2.2.3 при sort_values/dropna на datetime64
+    result["period_start"] = [
+        _period_to_ym(p) if pd.notna(p[0]) else ""
+        for p in pairs
+    ]
     result["period_type"] = [p[1] for p in pairs]
     result = result.sort_values("period_start", kind="stable").reset_index(drop=True)
     return result
@@ -192,10 +210,27 @@ def period_labels(values: pd.Series, fmt: str = "%Y-%m") -> pd.Series:
 
     Колонка ``period_start`` может прийти датой (после ``normalize_periods``)
     или текстом (готовая длинная таблица). ``.dt`` на тексте падает, поэтому
-    дата приводится через ``to_datetime``, а неразобранный текст остаётся как есть.
+    дата приводится через парсинг строк, а неразобранный текст остаётся как есть.
     """
-    dates = pd.to_datetime(values, errors="coerce")
-    return dates.dt.strftime(fmt).fillna(values.astype(str))
+    # Avoid pd.to_datetime which triggers segfault in pandas 2.2.3/numpy 2.1.3
+    out = []
+    for v in values:
+        if pd.isna(v):
+            out.append("")
+            continue
+        s = str(v).strip()
+        # Try to extract YYYY-MM
+        if len(s) >= 7 and s[4] == "-":
+            out.append(s[:7])
+        elif len(s) >= 10 and s[2] == "." and s[5] == ".":
+            # DD.MM.YYYY
+            out.append(f"{s[6:10]}-{s[3:5]}")
+        elif len(s) >= 10 and s[2] == "/" and s[5] == "/":
+            # DD/MM/YYYY
+            out.append(f"{s[6:10]}-{s[3:5]}")
+        else:
+            out.append(s)
+    return pd.Series(out, index=values.index)
 
 
 # Итоговые строки: по словарю данных это `product_code = 'ALL'`.
@@ -403,7 +438,8 @@ def validate_inputs(tables: dict[str, pd.DataFrame]) -> QualityReport:
     if finance is not None:
         if {"period", "product_code"} <= set(finance.columns):
             grain = finance[["period", "product_code"]].copy()
-            grain["period"] = grain["period"].map(canonical_period)
+            # Avoid .map() which triggers segfault in pandas 2.2.3/numpy 2.1.3
+            grain["period"] = [canonical_period(v) for v in grain["period"]]
             dup = int(grain.duplicated().sum())
             report.add("finance_grain_unique", dup == 0,
                        f"Дублей period+product_code: {dup}")

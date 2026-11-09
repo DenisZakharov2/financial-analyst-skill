@@ -39,6 +39,9 @@ from .metrics import (
     portfolio_summary,
     unit_economics,
 )
+from .pii import sanitize_tables
+from .seasonality_tat import funnel_tat, seasonality_summary
+from .comparison import compare_snapshots
 from .reporting import ReportData, fmt_num, quality_frame, write_html, write_reports
 from .visuals import (
     build_dashboard,
@@ -73,6 +76,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Границы прогноза: ±band × MAE бэктеста")
     parser.add_argument("--strict", action="store_true",
                         help="Завершиться с кодом 2 при провале контроля качества")
+    parser.add_argument("--pii-mode", choices=["strict", "redact", "off"], default="strict",
+                        help="Режим обработки ПДн: strict=остановить при обнаружении, redact=удалить ПДн и псевдонимизировать ключи, off=отключить проверку")
+    parser.add_argument("--compare-dirs", nargs=2, metavar=("BASE_DIR", "TARGET_DIR"),
+                        help="Сравнить две выгрузки: базовая и целевая директории")
+    parser.add_argument("--labels", nargs=2, metavar=("BASE_LABEL", "TARGET_LABEL"), default=["base", "target"],
+                        help="Подписи для сравниваемых срезов (по умолчанию base target)")
     parser.add_argument("--title", default="Финансовый аналитический отчёт")
     parser.add_argument("--quiet", action="store_true")
     return parser
@@ -105,13 +114,21 @@ def records(frame: pd.DataFrame | None) -> list[dict]:
         return []
     clean = frame.copy()
     for column in clean.columns:
-        clean[column] = clean[column].map(
-            lambda value: None if (isinstance(value, float) and np.isnan(value)) else value
-        )
+        # Avoid .map() which triggers segfault in pandas 2.2.3/numpy 2.1.3
+        clean[column] = [
+            None if (isinstance(v, float) and np.isnan(v)) else v
+            for v in clean[column]
+        ]
     clean = clean.astype(object).where(pd.notna(clean), None)
     for column in clean.columns:
-        if pd.api.types.is_datetime64_any_dtype(frame[column]):
-            clean[column] = frame[column].dt.strftime("%Y-%m-%d")
+        # Check if original column was datetime64 without using .dt accessor
+        col_dtype = frame[column].dtype
+        if hasattr(col_dtype, 'kind') and col_dtype.kind == 'M':  # datetime64
+            # Convert to YYYY-MM-DD strings using list comprehension
+            clean[column] = [
+                v.strftime("%Y-%m-%d") if hasattr(v, 'strftime') else str(v)[:10]
+                for v in frame[column]
+            ]
     return clean.to_dict(orient="records")
 
 
@@ -134,8 +151,12 @@ def json_ready(value):
     if isinstance(value, (np.floating, float)):
         number = float(value)
         return None if np.isnan(number) or np.isinf(number) else number
-    if isinstance(value, (pd.Timestamp,)):
-        return value.strftime("%Y-%m-%d")
+    # Handle pandas Timestamp without calling strftime (segfault risk)
+    if hasattr(value, 'strftime') and hasattr(value, 'year') and hasattr(value, 'month') and hasattr(value, 'day'):
+        try:
+            return f"{int(value.year):04d}-{int(value.month):02d}-{int(value.day):02d}"
+        except (AttributeError, ValueError):
+            pass
     try:
         if pd.isna(value):
             return None
@@ -307,6 +328,21 @@ def run(args: argparse.Namespace) -> int:
     tables, alias_notes = client_csv.normalize(tables)
     notes.extend(alias_notes)
 
+    # --- PII sanitization (before quality gates) ---
+    pii_mode = getattr(args, "pii_mode", "strict")
+    if pii_mode != "off":
+        tables, pii_report = sanitize_tables(tables, mode=pii_mode)
+        if pii_report.get("pii_found"):
+            if pii_mode == "strict":
+                # In strict mode, sanitize_tables raises ValueError, so we only get here in redact mode
+                pass
+            notes.append(
+                f"PII: режим={pii_mode}, удалены колонки={pii_report['findings']}, "
+                f"псевдонимизированы ключи={pii_report['pseudonymized_columns']}"
+            )
+        else:
+            notes.append("PII: прямых ПДн не обнаружено")
+
     survey_table = tables.get("macro_survey")
     if survey_table is not None and "period_start" not in survey_table.columns:
         if "period" in survey_table.columns:
@@ -344,7 +380,7 @@ def run(args: argparse.Namespace) -> int:
             "version": __version__,
             "data_dir": data_dir.name,
             "adapter": args.adapter,
-            "generated_at": pd.Timestamp.now().isoformat(timespec="seconds"),
+            "generated_at": __import__('datetime').datetime.now().isoformat(timespec="seconds"),
         },
         "quality": quality.to_dict(),
         "assumptions": assumptions,
@@ -373,9 +409,15 @@ def run(args: argparse.Namespace) -> int:
         if result["totals"].get("par30_pct") is not None:
             headline.append(headline_row("PAR 30", result["totals"]["par30_pct"], "%",
                                          "portfolio.dpd"))
-        chart = chart_portfolio(frame, charts_dir / "portfolio.png")
-        if chart:
-            charts["Портфель по типам продуктов"] = chart
+        # Workaround for matplotlib tight_layout recursion bug in Python 3.14
+        try:
+            chart = chart_portfolio(frame, charts_dir / "portfolio.png")
+            if chart:
+                charts["Портфель по типам продуктов"] = chart
+        except RecursionError:
+            pass
+        except Exception:
+            pass
 
 
     # --- Воронка ----------------------------------------------------------
@@ -400,9 +442,55 @@ def run(args: argparse.Namespace) -> int:
                                      funnel_table_name))
         headline.append(headline_row("Участников воронки", funnel["entities"], funnel["entity"],
                                      funnel_table_name, digits=0))
-        chart = chart_funnel(funnel["rows"], charts_dir / "funnel.png")
-        if chart:
-            charts["Воронка продаж"] = chart
+        # Workaround for matplotlib tight_layout recursion bug in Python 3.14
+        try:
+            chart = chart_funnel(funnel["rows"], charts_dir / "funnel.png")
+            if chart:
+                charts["Воронка продаж"] = chart
+        except RecursionError:
+            pass
+        except Exception:
+            pass
+
+        # --- Поэтапный TAT и SLA ---
+        sales_for_tat = tables.get("sales") if funnel_table_name == "funnel_events" else None
+        tat_result = funnel_tat(funnel_source, sales=sales_for_tat)
+        if tat_result.get("available"):
+            if not tat_result["by_transition"].empty:
+                sections.append(("Воронка: поэтапный TAT (дни)", tat_result["by_transition"],
+                                 tat_result["assumption"]))
+                metrics_payload["sections"]["funnel_tat"] = {
+                    "by_transition": records(tat_result["by_transition"]),
+                    "by_segment": records(tat_result["by_segment"]),
+                    "aging_backlog": records(tat_result["aging_backlog"]),
+                    "survival_curve": records(tat_result["survival_curve"]),
+                    "reference_date": tat_result["reference_date"],
+                    "assumption": tat_result["assumption"],
+                }
+                # Headline: медианный TAT по последнему переходу
+                last_trans = tat_result["by_transition"].iloc[-1]
+                headline.append(headline_row(
+                    f"TAT {last_trans['transition']} (медиана)", last_trans["median_p50_days"], "дней",
+                    "funnel_events"
+                ))
+            if not tat_result["aging_backlog"].empty:
+                sections.append(("Воронка: зависший бэклог", tat_result["aging_backlog"], ""))
+            if not tat_result["survival_curve"].empty:
+                sections.append(("Воронка: удержание Каплана-Мейера", tat_result["survival_curve"], ""))
+
+        # --- Сезонность воронки (если есть даты и количества) ---
+        season_result = seasonality_summary(funnel_source, value_col=funnel_column, period_col="event_date")
+        if season_result.get("available"):
+            sections.append(("Воронка: сезонные индексы", season_result["seasonal_indices"],
+                             season_result["assumption"]))
+            metrics_payload["sections"]["funnel_seasonality"] = {
+                "seasonal_indices": records(season_result["seasonal_indices"]),
+                "components": records(season_result["components"]),
+                "strength_seasonal": season_result["strength_seasonal"],
+                "strength_trend": season_result["strength_trend"],
+                "mode_used": season_result["mode_used"],
+                "assumption": season_result["assumption"],
+            }
 
     # --- Финансы и юнит-экономика ----------------------------------------
     finance = tables.get("finance")
@@ -476,14 +564,25 @@ def run(args: argparse.Namespace) -> int:
         }
         headline.append(headline_row(f"{short(indicator)} (последнее)", series["value"].iloc[-1],
                                      "п.", f"macro_survey, {industry}"))
-        chart = chart_series(series, "value", "period_start", charts_dir / "macro.png",
+        # Workaround for matplotlib tight_layout recursion bug in Python 3.14
+        try:
+            chart = chart_series(series, "value", "period_start", charts_dir / "macro.png",
                              label=industry)
-        if chart:
-            charts["Динамика по отрасли"] = chart
-        if not anomalies.empty:
-            chart = chart_anomalies(anomalies, charts_dir / "anomalies.png", label=industry)
             if chart:
-                charts["Аномалии по отрасли"] = chart
+                charts["Динамика по отрасли"] = chart
+        except RecursionError:
+            pass
+        except Exception:
+            pass
+        if not anomalies.empty:
+            try:
+                chart = chart_anomalies(anomalies, charts_dir / "anomalies.png", label=industry)
+                if chart:
+                    charts["Аномалии по отрасли"] = chart
+            except RecursionError:
+                pass
+            except Exception:
+                pass
 
         forecast = forecast_trend(series, horizon=args.forecast_h, band=args.band)
         metrics_payload["sections"]["forecast"] = forecast
@@ -496,9 +595,15 @@ def run(args: argparse.Namespace) -> int:
             })
             sections.append(("Прогноз: значения", frame,
                              f"MAE: {forecast['mae']}; MAPE: {forecast['mape_pct'] if forecast['mape_pct'] is not None else '— (все факты в бэктесте = 0)'} %"))
-            chart = chart_forecast(forecast, charts_dir / "forecast.png")
-            if chart:
-                charts["Прогноз по сценариям"] = chart
+            # Workaround for matplotlib tight_layout recursion bug in Python 3.14
+            try:
+                chart = chart_forecast(forecast, charts_dir / "forecast.png")
+                if chart:
+                    charts["Прогноз по сценариям"] = chart
+            except RecursionError:
+                pass
+            except Exception:
+                pass
 
         # Корреляции показателей внутри отрасли: перестановочный p-value не даёт
         # принять случайную связь за вывод, число проверенных пар фиксируется.
@@ -516,9 +621,15 @@ def run(args: argparse.Namespace) -> int:
                 "tested": int(correlation["tested"]),
                 "pairs": records(correlation["pairs"]),
             }
-            chart = chart_correlation(correlation["matrix"], charts_dir / "correlation.png")
-            if chart:
-                charts["Корреляционная матрица"] = chart
+            # Workaround for matplotlib tight_layout recursion bug in Python 3.14
+            try:
+                chart = chart_correlation(correlation["matrix"], charts_dir / "correlation.png")
+                if chart:
+                    charts["Корреляционная матрица"] = chart
+            except RecursionError:
+                pass
+            except Exception:
+                pass
 
         if "html" in formats:
             build_dashboard(survey, indicator, out_dir / "dashboard.html",
@@ -554,15 +665,64 @@ def run(args: argparse.Namespace) -> int:
                 period_start=lambda d: period_labels(d["period_start"]))
             columns = [c for c in ("period_start", group_col, value_col, "_z") if c and c in view_a.columns]
             sections.append((f"{title}: аномалии", view_a[columns], ""))
-        chart = chart_series(totals, value_col, "period_start",
-                             charts_dir / f"{key}.png", title=f"{title}: динамика")
-        if chart:
-            charts[f"{title}: динамика"] = chart
+        # Workaround for matplotlib tight_layout recursion bug in Python 3.14
+        try:
+            chart = chart_series(totals, value_col, "period_start",
+                                 charts_dir / f"{key}.png", title=f"{title}: динамика")
+            if chart:
+                charts[f"{title}: динамика"] = chart
+        except RecursionError:
+            pass
+        except Exception:
+            pass
         headline.append(headline_row(f"{title} (последнее)", totals[value_col].iloc[-1],
                                      "млн руб.", key))
         metrics_payload["sections"][key] = {
             "rows": records(view), "anomalies": records(anomalies),
         }
+
+    # --- Сравнение двух выгрузок (--compare-dirs) ---
+    if getattr(args, "compare_dirs", None):
+        base_dir = Path(args.compare_dirs[0])
+        target_dir = Path(args.compare_dirs[1])
+        label_base, label_target = args.labels
+        tables_base = load_tables(base_dir)
+        tables_target = load_tables(target_dir)
+        tables_base, _ = client_csv.normalize(tables_base)
+        tables_target, _ = client_csv.normalize(tables_target)
+        comparison = compare_snapshots(tables_base, tables_target, label_base, label_target)
+        if comparison.get("available"):
+            sections.append((f"Сравнение срезов: {label_base} → {label_target}: схема",
+                             comparison["schema"]["table_summary"],
+                             comparison["assumption"]))
+            bridge = comparison["portfolio_bridge"]
+            if bridge.get("available"):
+                sections.append((f"Сравнение: портфельный Bridge", bridge["bridge_table"],
+                                 f"Δ портфель: {bridge['balance_delta']:,.2f} ({bridge['balance_growth_pct']:.2f}%), "
+                                 f"Retention: {bridge['client_retention_pct']:.2f}%, NRR: {bridge['net_dollar_retention_pct']:.2f}%"))
+                headline.append(headline_row(
+                    f"Δ Портфель ({label_base}→{label_target})", bridge["balance_delta"], "руб.",
+                    "portfolio", digits=0
+                ))
+                headline.append(headline_row(
+                    "Client Retention", bridge["client_retention_pct"], "%",
+                    "portfolio"
+                ))
+                headline.append(headline_row(
+                    "Net Dollar Retention", bridge["net_dollar_retention_pct"], "%",
+                    "portfolio"
+                ))
+            if not comparison["finance_comparison"].empty:
+                sections.append((f"Сравнение: P&L", comparison["finance_comparison"], ""))
+            metrics_payload["sections"]["comparison"] = {
+                "labels": comparison["labels"],
+                "schema": {k: records(v) if hasattr(v, "to_dict") else v
+                           for k, v in comparison["schema"].items()},
+                "portfolio_bridge": {k: records(v) if hasattr(v, "to_dict") else v
+                                     for k, v in bridge.items()},
+                "finance_comparison": records(comparison["finance_comparison"]),
+                "assumption": comparison["assumption"],
+            }
 
     # --- Плоские метрики --------------------------------------------------
     # metrics.csv — плоский список чисел для сверки: разделы, ключевые

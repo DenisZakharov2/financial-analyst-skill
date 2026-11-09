@@ -148,9 +148,12 @@ def chart_anomalies(anomalies: pd.DataFrame, path: Path, label: str = "") -> Pat
         _empty(path)
         return None
     data = anomalies.sort_values("_z")
-    labels = (data["period_start"].dt.strftime("%Y-%m-%d")
-              if pd.api.types.is_datetime64_any_dtype(data["period_start"])
-              else data["period_start"].astype(str))
+    # Avoid .dt.strftime which triggers segfault in pandas 2.2.3/numpy 2.1.3
+    col = data["period_start"]
+    if hasattr(col.dtype, 'kind') and col.dtype.kind == 'M':  # datetime64
+        labels = [v.strftime("%Y-%m-%d") if hasattr(v, 'strftime') else str(v)[:10] for v in col]
+    else:
+        labels = col.astype(str).tolist()
     fig, ax = plt.subplots(figsize=(10, 4.5))
     colors = [PALETTE["negative"] if value > 0 else PALETTE["positive"] for value in data["_z"]]
     ax.barh(labels, data["_z"], color=colors, height=0.6)
@@ -449,7 +452,16 @@ def build_dashboard(survey: pd.DataFrame, indicator: str, path: Path,
 
     wide = (data.pivot_table(index="period_start", columns="industry", values="value", aggfunc="first")
                 .sort_index())
-    periods = [p.strftime("%Y-%m") if hasattr(p, "strftime") else str(p) for p in wide.index]
+    # Avoid strftime on Timestamp (segfault risk in pandas 2.2.3/numpy 2.1.3)
+    periods = []
+    for p in wide.index:
+        if hasattr(p, 'strftime') and hasattr(p, 'year') and hasattr(p, 'month'):
+            try:
+                periods.append(f"{int(p.year):04d}-{int(p.month):02d}")
+            except (AttributeError, ValueError):
+                periods.append(str(p)[:7])
+        else:
+            periods.append(str(p)[:7])
     industries = [str(c) for c in wide.columns]
 
     series = {str(c): [None if pd.isna(v) else round(float(v), 3) for v in wide[c]] for c in wide.columns}
@@ -497,11 +509,12 @@ def build_dashboard(survey: pd.DataFrame, indicator: str, path: Path,
     safe_indicator = html.escape(indicator)
     safe_data = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
 
+    import datetime as dt
     html_out = (DASHBOARD_TEMPLATE
             .replace("__PLOTLY__", get_plotlyjs())
             .replace("__DATA__", safe_data)
             .replace("__TITLE__", safe_title)
             .replace("__INDICATOR__", safe_indicator)
-            .replace("__GENERATED__", pd.Timestamp.now().strftime("%d.%m.%Y %H:%M")))
+            .replace("__GENERATED__", dt.datetime.now().strftime("%d.%m.%Y %H:%M")))
     path.write_text(html_out, encoding="utf-8")
     return path

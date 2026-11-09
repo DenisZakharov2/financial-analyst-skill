@@ -130,8 +130,12 @@ def _fmt_pct(value, digits: int = 2) -> str:
 
 
 def _fmt_cell(value, column: str = "") -> str:
-    if isinstance(value, (pd.Timestamp,)):
-        return value.strftime("%d.%m.%Y")
+    # Handle pandas Timestamp without calling strftime (segfault risk)
+    if hasattr(value, 'strftime') and hasattr(value, 'year') and hasattr(value, 'month') and hasattr(value, 'day'):
+        try:
+            return f"{int(value.day):02d}.{int(value.month):02d}.{int(value.year):04d}"
+        except (AttributeError, ValueError):
+            pass
     if isinstance(value, str):
         return value
     if column.endswith("_pct") or column in {"share_pct", "from_start_pct", "stage_pct"}:
@@ -147,7 +151,8 @@ def _table_for_output(df: pd.DataFrame) -> pd.DataFrame:
     """Привести таблицу к строкам для DOCX/PDF/PPTX (без потери чисел в XLSX)."""
     out = df.copy()
     for column in out.columns:
-        out[column] = out[column].map(lambda value, c=column: _fmt_cell(value, c))
+        # Avoid .map() which triggers segfault in pandas 2.2.3/numpy 2.1.3
+        out[column] = [_fmt_cell(value, column) for value in out[column]]
     out.columns = [column_title(column) for column in out.columns]
     return out
 
@@ -190,10 +195,25 @@ def report_timestamp(report: ReportData, fmt: str = "%d.%m.%Y %H:%M") -> str:
     Берётся из ``meta`` (её же пишет `metrics.json`), поэтому DOCX, PDF, XLSX,
     PPTX, RTF и HTML показывают одно и то же время, а не шесть разных секунд.
     """
-    moment = pd.to_datetime(report.meta.get("generated_at"), errors="coerce")
-    if pd.isna(moment):
-        moment = pd.Timestamp.now()
-    return pd.Timestamp(moment).strftime(fmt)
+    from datetime import datetime
+    generated_at = report.meta.get("generated_at")
+    if generated_at:
+        try:
+            # Parse ISO format: YYYY-MM-DDTHH:MM:SS
+            dt = datetime.fromisoformat(str(generated_at).replace('Z', '+00:00'))
+        except (ValueError, AttributeError):
+            dt = datetime.now()
+    else:
+        dt = datetime.now()
+    
+    # Format without strftime to avoid locale issues
+    if fmt == "%d.%m.%Y %H:%M":
+        return f"{dt.day:02d}.{dt.month:02d}.{dt.year:04d} {dt.hour:02d}:{dt.minute:02d}"
+    elif fmt == "%d.%m.%Y":
+        return f"{dt.day:02d}.{dt.month:02d}.{dt.year:04d}"
+    else:
+        # Fallback to strftime for other formats
+        return dt.strftime(fmt)
 
 
 def _chart_title(name: str) -> str:
