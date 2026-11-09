@@ -514,13 +514,38 @@ def macro_structure(df: pd.DataFrame, value_col: str = "value_mln_rub",
 STEP_MONTHS = ((27, 32, 1), (85, 95, 3), (175, 190, 6), (360, 370, 12))
 
 
+def _parse_ym_to_months(period_str: str) -> int | None:
+    """Parse YYYY-MM string to months since epoch. Returns None if invalid."""
+    try:
+        year, month = map(int, period_str.split("-")[:2])
+        if 1 <= month <= 12:
+            return year * 12 + month - 1
+    except (ValueError, AttributeError):
+        pass
+    return None
+
+
+def _months_to_ym(months: int) -> str:
+    """Convert months since epoch to YYYY-MM string."""
+    year = months // 12
+    month = months % 12 + 1
+    return f"{year:04d}-{month:02d}"
+
+
 def _median_step_days(periods: pd.Series) -> float | None:
-    """Медианный шаг ряда в днях; None, если разбираемых дат меньше двух."""
-    dates = pd.to_datetime(pd.Series(periods), errors="coerce").dropna()
-    if len(dates) < 2:
+    """Медианный шаг ряда в днях (для monthly ~30); None, если разбираемых дат меньше двух."""
+    months_list = []
+    for p in periods:
+        m = _parse_ym_to_months(str(p))
+        if m is not None:
+            months_list.append(m)
+    if len(months_list) < 2:
         return None
-    diffs = dates.sort_values().diff().dropna().dt.days
-    return float(diffs.median()) if len(diffs) else None
+    months_list.sort()
+    diffs = [months_list[i] - months_list[i-1] for i in range(1, len(months_list))]
+    diffs.sort()
+    median_months = diffs[len(diffs) // 2]
+    return float(median_months * 30.44)  # approximate days per month
 
 
 def _step_months(periods: pd.Series) -> int | None:
@@ -548,17 +573,32 @@ def _yoy_pct(work: pd.DataFrame, value_col: str, period_col: str) -> pd.Series |
     """
     if _step_months(work[period_col]) not in (1, 3, 6):
         return None
-    dates = pd.to_datetime(work[period_col], errors="coerce")
-    lookup = pd.Series(work[value_col].to_numpy(dtype="float64"), index=dates)
-    lookup = lookup[lookup.index.notna()]
-    lookup = lookup[~lookup.index.duplicated(keep="last")].sort_index()
-    if lookup.empty:
+    # Parse periods to months since epoch
+    periods = work[period_col]
+    period_months = []
+    for p in periods:
+        m = _parse_ym_to_months(str(p))
+        period_months.append(m)
+    
+    # Build lookup: month -> value
+    lookup = {}
+    for m, v in zip(period_months, work[value_col]):
+        if m is not None and pd.notna(v):
+            lookup[m] = float(v)
+    
+    if not lookup:
         return None
-    shifted = lookup.reindex(lookup.index - pd.DateOffset(months=12))
-    previous = pd.Series(shifted.to_numpy(), index=lookup.index)
-    # Avoid .map() which triggers segfault in pandas 2.2.3/numpy 2.1.3
-    previous_mapped = np.array([previous.get(d, np.nan) for d in dates], dtype="float64")
-    return _pct_change(work[value_col].astype("float64"), pd.Series(previous_mapped, index=work.index))
+    
+    # For each period, find value 12 months ago
+    previous_vals = []
+    for m in period_months:
+        if m is not None and (m - 12) in lookup:
+            previous_vals.append(lookup[m - 12])
+        else:
+            previous_vals.append(np.nan)
+    
+    previous_series = pd.Series(previous_vals, index=work.index)
+    return _pct_change(work[value_col].astype("float64"), previous_series)
 
 
 def macro_dynamics(series: pd.DataFrame, value_col: str = "value_mln_rub",
@@ -669,7 +709,7 @@ def forecast_trend(series: pd.DataFrame, value_col: str = "value",
     для убывающего или отрицательного ряда множитель меняет знак смысла.
     """
     data = series.copy()
-    data[period_col] = pd.to_datetime(data[period_col], errors="coerce")
+    # Sort by period string (YYYY-MM format sorts correctly)
     data = data.dropna(subset=[value_col, period_col]).sort_values(period_col)
     if len(data) < 6:
         return {"available": False, "reason": "нужно минимум 6 периодов"}
@@ -686,9 +726,9 @@ def forecast_trend(series: pd.DataFrame, value_col: str = "value",
     nonzero = actual != 0
     mape = float(np.mean(np.abs((actual[nonzero] - predicted[nonzero]) / actual[nonzero])) * 100) if nonzero.any() else None
 
-    last_period = pd.Timestamp(data[period_col].iloc[-1])
-    step = _infer_step(data[period_col])
-    future = [last_period + step * (i + 1) for i in range(horizon)]
+    last_period = data[period_col].iloc[-1]
+    step_months = _infer_step_months(data[period_col])
+    future = [_add_months_to_ym(last_period, step_months * (i + 1)) for i in range(horizon)]
     base = np.polyval([slope, intercept], np.arange(len(y), len(y) + horizon, dtype=float))
     delta = band * mae
     assumption = ("Линейный тренд по истории; границы сценариев = базовая линия ± "
@@ -699,7 +739,7 @@ def forecast_trend(series: pd.DataFrame, value_col: str = "value",
 
     return {
         "available": True,
-        "periods": [p.strftime("%Y-%m-%d") for p in future],
+        "periods": future,
         "scenarios": {
             "пессимистичный": [round(float(v - delta), 2) for v in base],
             "базовый": [round(float(v), 2) for v in base],
@@ -714,18 +754,27 @@ def forecast_trend(series: pd.DataFrame, value_col: str = "value",
     }
 
 
-def _infer_step(periods: pd.Series) -> pd.DateOffset:
+def _add_months_to_ym(ym_str: str, months: int) -> str:
+    """Add months to YYYY-MM string and return new YYYY-MM string."""
+    try:
+        year, month = map(int, ym_str.split("-")[:2])
+        month += months
+        year += (month - 1) // 12
+        month = ((month - 1) % 12) + 1
+        return f"{year:04d}-{month:02d}"
+    except (ValueError, AttributeError):
+        return ym_str
+
+
+def _infer_step_months(periods: pd.Series) -> int:
+    """Return step in months (1, 3, 6, 12, or 0 for daily/weekly)."""
     days = _median_step_days(periods) or 30.0
     if days >= 300:
-        return pd.DateOffset(years=1)
+        return 12
     if days >= 170:
-        return pd.DateOffset(months=6)
+        return 6
     if days >= 80:
-        return pd.DateOffset(months=3)
+        return 3
     if days >= 27:
-        return pd.DateOffset(months=1)
-    if days <= 2:
-        return pd.DateOffset(days=1)
-    if days <= 10:
-        return pd.DateOffset(weeks=1)
-    return pd.DateOffset(months=1)
+        return 1
+    return 0  # daily/weekly - not used for monthly forecasting

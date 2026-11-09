@@ -56,12 +56,12 @@ def test_missing_data_dir_returns_error(tmp_path):
     assert code == 2
 
 
-def test_macro_tables_are_analyzed(tmp_path):
+def test_macro_tables_are_analyzed(tmp_path, date_strings_fixture):
     data = tmp_path / "macro"
     data.mkdir()
-    periods = pd.date_range("2023-01-01", periods=18, freq="MS")
+    periods = date_strings_fixture("2023-01", 18)
     deposits = pd.DataFrame({
-        "period": [p.strftime("%Y-%m") for p in periods for _ in (0, 1)],
+        "period": [p for p in periods for _ in (0, 1)],
         "category": ["вклады_физлиц", "депозиты_юрлиц"] * len(periods),
         "currency": "RUB",
         "term_bucket": "до востребования",
@@ -79,10 +79,42 @@ def test_macro_tables_are_analyzed(tmp_path):
     assert "Вклады и депозиты: динамика" in names
 
 
+def _months_from_str(date_str: str) -> int:
+    """Convert YYYY-MM string to months since epoch."""
+    year, month = map(int, date_str.split("-"))
+    return year * 12 + month - 1
+
+
+def _str_from_months(months: int) -> str:
+    """Convert months since epoch to YYYY-MM string."""
+    year = months // 12
+    month = months % 12 + 1
+    return f"{year:04d}-{month:02d}"
+
+
+def date_strings(start: str, periods: int, freq: str = "M") -> list[str]:
+    """Generate list of YYYY-MM strings without pandas datetime operations."""
+    if freq == "M":
+        step = 1
+    elif freq == "Q":
+        step = 3
+    elif freq == "Y":
+        step = 12
+    else:
+        step = 1
+
+    start_months = _months_from_str(start)
+    result = []
+    for i in range(periods):
+        months = start_months + i * step
+        result.append(_str_from_months(months))
+    return result
+
+
 def _write_survey(data, periods: int = 8) -> None:
-    dates = pd.date_range("2023-01-01", periods=periods, freq="MS")
+    dates = date_strings("2023-01", periods)
     rows = [
-        {"period": date.strftime("%Y-%m"),
+        {"period": date,
          "industry": industry,
          "indicator": "Индикатор бизнес-климата",
          "value": 1.0 + 0.1 * index}
@@ -92,7 +124,7 @@ def _write_survey(data, periods: int = 8) -> None:
     pd.DataFrame(rows).to_csv(data / "macro_survey.csv", index=False)
 
 
-def test_macro_survey_csv_is_normalized(tmp_path):
+def test_macro_survey_csv_is_normalized(tmp_path, date_strings_fixture):
     data = tmp_path / "survey"
     data.mkdir()
     _write_survey(data)
@@ -104,15 +136,13 @@ def test_macro_survey_csv_is_normalized(tmp_path):
     assert not (out / "dashboard.html").exists(), "дашборд не запрошен в --format"
 
 
-def test_unknown_indicator_returns_data_error(tmp_path):
+def test_unknown_indicator_returns_data_error(tmp_path, date_strings_fixture):
     data = tmp_path / "survey"
     data.mkdir()
     _write_survey(data)
     code = main(["--data-dir", str(data), "--out", str(tmp_path / "out"),
                  "--format", "xlsx", "--indicator", "Нет такого", "--quiet"])
     assert code == 2
-
-
 
 
 def test_metrics_json_has_no_nan(tmp_path):
@@ -128,13 +158,12 @@ def test_metrics_json_has_no_nan(tmp_path):
     assert metrics["sections"]["portfolio"]["totals"]["top10_clients_share_pct"] is None
 
 
-
-def test_cbr_adapter_accepts_any_workbook_name(tmp_path):
+def test_cbr_adapter_accepts_any_workbook_name(tmp_path, date_strings_fixture):
     data = tmp_path / "survey"
     data.mkdir()
     rows = [["Период", "Индикатор бизнес-климата"]]
-    for index, date in enumerate(pd.date_range("2023-01-01", periods=8, freq="MS")):
-        rows.append([date.strftime("%Y-%m"), 1.0 + index])
+    for index, date in enumerate(date_strings_fixture("2023-01", 8)):
+        rows.append([date, 1.0 + index])
     pd.DataFrame(rows).to_excel(data / "opros.xlsx", sheet_name="Экономика всего",
                                 header=False, index=False)
     out = tmp_path / "out"
@@ -144,15 +173,15 @@ def test_cbr_adapter_accepts_any_workbook_name(tmp_path):
     assert metrics["sections"]["macro"]["indicator"] == "Индикатор бизнес-климата"
 
 
-def test_macro_survey_correlations(tmp_path):
+def test_macro_survey_correlations(tmp_path, date_strings_fixture):
     data = tmp_path / "survey"
     data.mkdir()
     rows = []
-    for index, date in enumerate(pd.date_range("2023-01-01", periods=10, freq="MS")):
+    for index, date in enumerate(date_strings_fixture("2023-01", 10)):
         for industry in ("Экономика всего", "Обрабатывающие производства"):
-            rows.append({"period": date.strftime("%Y-%m"), "industry": industry,
+            rows.append({"period": date, "industry": industry,
                          "indicator": "Индикатор бизнес-климата", "value": 1.0 + 0.1 * index})
-            rows.append({"period": date.strftime("%Y-%m"), "industry": industry,
+            rows.append({"period": date, "industry": industry,
                          "indicator": "Оценка спроса", "value": 2.0 + 0.2 * index})
     pd.DataFrame(rows).to_csv(data / "macro_survey.csv", index=False)
     out = tmp_path / "out"
@@ -173,13 +202,13 @@ def test_macro_survey_correlations(tmp_path):
     assert metrics["sections"]["macro"]["indicator"] == "Индикатор бизнес-климата"
 
 
-def test_text_period_start_does_not_break_macro_sections(tmp_path):
+def test_text_period_start_does_not_break_macro_sections(tmp_path, date_strings_fixture):
     """period_start текстом (готовая длинная таблица) — не повод падать с .dt."""
     data = tmp_path / "survey"
     data.mkdir()
-    rows = [{"period_start": date.strftime("%Y-%m"), "industry": "Экономика всего",
+    rows = [{"period_start": date, "industry": "Экономика всего",
              "indicator": "Индикатор бизнес-климата", "value": 1.0 + index}
-            for index, date in enumerate(pd.date_range("2023-01-01", periods=8, freq="MS"))]
+            for index, date in enumerate(date_strings_fixture("2023-01", 8))]
     pd.DataFrame(rows).to_csv(data / "macro_survey.csv", index=False)
     out = tmp_path / "out"
     assert main(["--data-dir", str(data), "--out", str(out), "--format", "xlsx",
@@ -237,7 +266,6 @@ def test_total_rows_are_excluded_and_reported(tmp_path):
     assert any("product_code=ALL" in item for item in metrics["warnings"])
 
 
-
 def test_metrics_csv_contains_headline_and_unit_economics(sample_dir, tmp_path):
     """Шаг «сверьте headline с metrics.csv» должен быть выполним."""
     assert main(["--data-dir", str(sample_dir), "--out", str(tmp_path),
@@ -268,4 +296,3 @@ def test_metrics_csv_has_header_for_empty_run(tmp_path):
                  "--quiet"]) == 0
     frame = pd.read_csv(out / "metrics.csv", encoding="utf-8-sig")
     assert list(frame.columns) == ["section", "metric", "dimension", "value"]
-

@@ -55,9 +55,11 @@ def test_finance_all_rows_warned():
     assert any("product_code=ALL" in item for item in report.warnings)
 
 
-def test_macro_survey_period_check():
+def test_macro_survey_period_check(date_strings_fixture):
+    dates = date_strings_fixture("2026-01", 2)
+    dates[1] = ""  # None equivalent
     survey = pd.DataFrame({
-        "period_start": pd.to_datetime(["2026-01-01", None]),
+        "period_start": dates,
         "industry": ["A", "A"],
         "indicator": ["I", "I"],
         "value": [1.0, 2.0],

@@ -184,6 +184,9 @@ def canonical_period(value) -> str:
     # Быстрая проверка: если уже в формате YYYY-MM, вернуть как есть
     if isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}", value):
         return value
+    start, _ = parse_period(value)
+    if pd.isna(start):
+        return str(value)
     return _period_to_ym(parse_period(value))
 
 
@@ -196,8 +199,9 @@ def normalize_periods(df: pd.DataFrame, column: str = "period") -> pd.DataFrame:
     pairs = [parse_period(v) for v in result[column]]
     # Храним period_start как строку YYYY-MM, а не Timestamp,
     # чтобы избежать segfault в pandas 2.2.3 при sort_values/dropna на datetime64
+    # Используем pd.NA для невозможных дат, чтобы isna() работала корректно
     result["period_start"] = [
-        _period_to_ym(p) if pd.notna(p[0]) else ""
+        _period_to_ym(p) if pd.notna(p[0]) else pd.NA
         for p in pairs
     ]
     result["period_type"] = [p[1] for p in pairs]
@@ -471,7 +475,9 @@ def validate_inputs(tables: dict[str, pd.DataFrame]) -> QualityReport:
     if survey is not None:
         report.add("macro_survey_rows", len(survey) > 0, f"Строк: {len(survey)}")
         if "period_start" in survey.columns:
-            bad = int(survey["period_start"].isna().sum())
+            # Count both NaN and empty strings as unparsed periods
+            period_start = survey["period_start"]
+            bad = int(period_start.isna().sum() + (period_start == "").sum())
             report.add("macro_survey_periods", bad == 0,
                        f"Неразобранных периодов: {bad}")
         if "value" in survey.columns:

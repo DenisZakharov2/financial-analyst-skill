@@ -115,8 +115,8 @@ def test_finance_margin_rows():
     assert row["margin_pct"] == pytest.approx(50.0)
 
 
-def test_macro_anomalies_are_computed_within_series():
-    dates = pd.date_range("2024-01-01", periods=30, freq="MS")
+def test_macro_anomalies_are_computed_within_series(date_strings_fixture):
+    dates = date_strings_fixture("2024-01", 30)
     left = pd.DataFrame({"period_start": dates, "category": "A", "value": 10.0})
     left.loc[5, "value"] = 100.0
     right = pd.DataFrame({"period_start": dates, "category": "B", "value": 1000.0})
@@ -126,10 +126,10 @@ def test_macro_anomalies_are_computed_within_series():
     assert anomalies.iloc[0]["category"] == "A"
 
 
-def test_forecast_band_order():
-    dates = pd.date_range("2020-01-01", periods=12, freq="MS")
+def test_forecast_band_order(date_strings_fixture):
+    dates = date_strings_fixture("2020-01", 12)
     values = np.arange(1, 13, dtype=float) + np.array([0.4, -0.3, 0.2, -0.5, 0.6, -0.2,
-                                                       0.3, -0.4, 0.5, -0.1, 0.2, -0.3])
+                                                        0.3, -0.4, 0.5, -0.1, 0.2, -0.3])
     series = pd.DataFrame({"period_start": dates, "value": values})
     result = forecast_trend(series, horizon=4)
     assert result["available"]
@@ -139,13 +139,13 @@ def test_forecast_band_order():
 
 
 def test_forecast_requires_six_points():
-    series = pd.DataFrame({"period_start": pd.date_range("2024-01-01", periods=3, freq="MS"),
+    series = pd.DataFrame({"period_start": ["2024-01", "2024-02", "2024-03"],
                            "value": [1.0, 2.0, 3.0]})
     assert forecast_trend(series)["available"] is False
 
 
-def test_forecast_with_perfect_fit_reports_zero_band():
-    dates = pd.date_range("2020-01-01", periods=10, freq="MS")
+def test_forecast_with_perfect_fit_reports_zero_band(date_strings_fixture):
+    dates = date_strings_fixture("2020-01", 10)
     series = pd.DataFrame({"period_start": dates, "value": np.arange(1, 11, dtype=float)})
     result = forecast_trend(series)
     assert result["band_mae"] == 0
@@ -323,10 +323,11 @@ def test_accounts_in_rows_sum_to_total():
     assert int(result["rows"]["accounts"].sum()) == result["totals"]["accounts"]
 
 
-def test_change_pct_is_null_when_previous_is_zero():
+def test_change_pct_is_null_when_previous_is_zero(date_strings_fixture):
     """Контракт change_pct: нулевая база → null, а не бесконечность в отчёте."""
+    dates = date_strings_fixture("2024-01", 4)
     series = pd.DataFrame({
-        "period_start": pd.date_range("2024-01-01", periods=4, freq="MS"),
+        "period_start": dates,
         "value_mln_rub": [0.0, 5.0, 0.0, 10.0],
     })
     frame = macro_dynamics(series)
@@ -337,10 +338,11 @@ def test_change_pct_is_null_when_previous_is_zero():
     assert np.isfinite(frame["change_pct"].dropna()).all()
 
 
-def test_yoy_uses_calendar_year_not_row_shift():
+def test_yoy_uses_calendar_year_not_row_shift(date_strings_fixture):
     """Квартальный ряд: год назад — это 4 строки назад, а не 12."""
+    dates = date_strings_fixture("2020-01", 6, freq="Q")
     series = pd.DataFrame({
-        "period_start": pd.date_range("2020-01-01", periods=6, freq="QS"),
+        "period_start": dates,
         "value_mln_rub": [10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
     })
     frame = macro_dynamics(series)
@@ -349,25 +351,28 @@ def test_yoy_uses_calendar_year_not_row_shift():
     assert frame["yoy_pct"].iloc[5] == pytest.approx(200.0)   # (60 − 20) / 20
 
 
-def test_yoy_is_skipped_for_daily_series():
+def test_yoy_is_skipped_for_daily_series(date_strings_daily_fixture):
     """YoY не строится там, где шаг ряда не месяц/квартал/полугодие."""
+    dates = date_strings_daily_fixture("2024-01-01", 20)
     series = pd.DataFrame({
-        "period_start": pd.date_range("2024-01-01", periods=20, freq="D"),
+        "period_start": dates,
         "value_mln_rub": [1.0] * 20,
     })
     assert "yoy_pct" not in macro_dynamics(series).columns
 
 
-def test_report_and_dashboard_share_the_same_anomaly_math(tmp_path):
-    """Одна реализация робастного Z: отчёт и дашборд не расходятся на одном ряду."""
+def test_report_and_dashboard_share_the_same_anomaly_math(tmp_path, date_strings_fixture):
+    """Одна реализация робастного Z: отчёт и дашборд не должны
+    расходиться на одном и том же ряду."""
     import json
     import re
 
     from finanalyst.visuals import build_dashboard
 
     # MAD = 0 (десять единиц и выброс) — раньше отчёт считал по σ, дашборд давал нули.
+    dates = date_strings_fixture("2024-01", 11)
     series = pd.DataFrame({
-        "period_start": pd.date_range("2024-01-01", periods=11, freq="MS"),
+        "period_start": dates,
         "value": [1.0] * 10 + [1000.0],
     })
     report = macro_anomalies(series, value_col="value", group_cols=())

@@ -105,7 +105,11 @@ def chart_funnel(rows: pd.DataFrame, path: Path) -> Path | None:
     ax.set_axisbelow(True)
     for spine in ("top", "right"):
         ax.spines[spine].set_visible(False)
-    fig.tight_layout()
+    # Workaround for matplotlib tight_layout recursion bug in Python 3.14
+    try:
+        fig.tight_layout()
+    except RecursionError:
+        pass
     fig.savefig(path, dpi=150)
     plt.close(fig)
     return path
@@ -217,7 +221,11 @@ def chart_correlation(corr: pd.DataFrame, path: Path) -> Path | None:
                 ax.text(j, i, f"{value:.2f}", ha="center", va="center", fontsize=8,
                         color="white" if abs(value) > 0.5 else "black")
     ax.set_title(CHART_TITLES["correlation"])
-    fig.tight_layout()
+    # Workaround for matplotlib tight_layout recursion bug in Python 3.14
+    try:
+        fig.tight_layout()
+    except RecursionError:
+        pass
     fig.savefig(path, dpi=150)
     plt.close(fig)
     return path
