@@ -28,6 +28,9 @@ from .core import (
     period_labels,
     validate_inputs,
 )
+from .drivers import macro_lead_lag, par_shift_decomposition, pvm_decomposition
+from .experiments import run_ab_test
+from .forecast import forecast_advanced
 from .metrics import (
     MetricError,
     finance_summary,
@@ -41,8 +44,9 @@ from .metrics import (
     unit_economics,
 )
 from .pii import sanitize_tables
-from .reporting import ReportData, fmt_num, quality_frame, write_html, write_reports
+from .reporting import ReportData, column_title, fmt_num, quality_frame, write_html, write_reports
 from .seasonality_tat import funnel_tat, seasonality_summary
+from .segmentation import segment_clients
 from .visuals import (
     build_dashboard,
     chart_anomalies,
@@ -74,6 +78,31 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--forecast-h", type=int, default=4, help="Горизонт прогноза, периодов")
     parser.add_argument("--band", type=float, default=1.0,
                         help="Границы прогноза: ±band × MAE бэктеста")
+    parser.add_argument("--forecast-model", choices=["legacy", "auto", "linear", "ets", "arx"],
+                        default="legacy",
+                        help="Модель прогноза: legacy — линейный тренд (по умолчанию), auto — выбор "
+                             "модели на бэктесте, linear/ets/arx — фиксированная модель")
+    parser.add_argument("--ab-test", action="store_true",
+                        help="Оценить A/B-тест: SRM, тест Уэлча, CUPED, линеаризация ratio-метрик")
+    parser.add_argument("--ab-metric", default="value",
+                        help="Колонка метрики для A/B-теста (по умолчанию value)")
+    parser.add_argument("--ab-metric-type", choices=["continuous", "proportion", "ratio"],
+                        default="continuous", help="Тип метрики A/B-теста")
+    parser.add_argument("--ab-denominator", default=None,
+                        help="Знаменатель ratio-метрики A/B-теста (например, deals)")
+    parser.add_argument("--ab-pre-metric", default=None,
+                        help="Доэкспериментальная ковариата для CUPED")
+    parser.add_argument("--ab-group-col", default="experiment_group",
+                        help="Колонка групп пилота (control / treatment)")
+    parser.add_argument("--segment", action="store_true",
+                        help="Сегментация клиентов: матрица RFM + Risk и кластеризация")
+    parser.add_argument("--no-cluster", action="store_true",
+                        help="Без кластеризации в сегментации (только RFM + Risk)")
+    parser.add_argument("--drivers", action="store_true",
+                        help="Факторный разбор: PVM и разложение сдвига PAR между срезами, "
+                             "лаговые связи макропоказателей")
+    parser.add_argument("--drivers-max-lag", type=int, default=3,
+                        help="Максимальный лаг для теста Грейнджера (по умолчанию 3)")
     parser.add_argument("--strict", action="store_true",
                         help="Завершиться с кодом 2 при провале контроля качества")
     parser.add_argument("--pii-mode", choices=["strict", "redact", "off"], default="strict",
@@ -274,6 +303,91 @@ def _correlations(survey: pd.DataFrame, industry: str, max_indicators: int = 8,
 
 
 # --------------------------------------------------------------------------
+# Расширенные расчёты: A/B-тест, сегментация, факторный разбор
+# --------------------------------------------------------------------------
+
+def _ab_source(tables: dict[str, pd.DataFrame], group_col: str) -> tuple[str | None, pd.DataFrame | None]:
+    """Найти таблицу с колонкой групп пилота.
+
+    Порядок предпочтения: ``sales`` (есть сумма и факт сделки), ``clients``,
+    ``portfolio``.
+    """
+    for name in ("sales", "clients", "portfolio"):
+        frame = tables.get(name)
+        if frame is not None and not frame.empty and group_col in frame.columns:
+            return name, frame
+    return None, None
+
+
+def _ab_metric_column(frame: pd.DataFrame, requested: str) -> str | None:
+    """Определить колонку метрики: запрошенная либо первая подходящая из типовых."""
+    if requested in frame.columns:
+        return requested
+    for candidate in ("value", "amount", "balance", "revenue"):
+        if candidate in frame.columns:
+            return candidate
+    return None
+
+
+def _ab_report_frame(result: dict) -> pd.DataFrame:
+    """Плоская таблица результатов A/B-теста для отчёта."""
+    srm = result.get("srm_check", {})
+    ci_low, ci_high = (result.get("ci_95") or (None, None))
+    rows = [
+        {"Показатель": "Метод", "Значение": result.get("test_used", ""), "Ед.": ""},
+        {"Показатель": "Клиентов в контроле", "Значение": fmt_num(result.get("n_control"), 0), "Ед.": "чел."},
+        {"Показатель": "Клиентов в тесте", "Значение": fmt_num(result.get("n_treatment"), 0), "Ед.": "чел."},
+        {"Показатель": "Среднее в контроле", "Значение": fmt_num(result.get("control_mean"), 2), "Ед.": ""},
+        {"Показатель": "Среднее в тесте", "Значение": fmt_num(result.get("treatment_mean"), 2), "Ед.": ""},
+        {"Показатель": "Абсолютный эффект", "Значение": fmt_num(result.get("absolute_effect"), 2), "Ед.": ""},
+        {"Показатель": "Относительный эффект", "Значение": fmt_num(result.get("relative_uplift_pct"), 2), "Ед.": "%"},
+        {"Показатель": "Доверительный интервал 95 %",
+         "Значение": f"{fmt_num(ci_low, 2)} … {fmt_num(ci_high, 2)}", "Ед.": ""},
+        {"Показатель": "p-value", "Значение": fmt_num(result.get("p_value"), 4), "Ед.": ""},
+        {"Показатель": "p-value Манна — Уитни",
+         "Значение": fmt_num(result.get("mann_whitney_p_value"), 4), "Ед.": ""},
+        {"Показатель": "MDE (минимальный значимый эффект)",
+         "Значение": fmt_num(result.get("mde_absolute"), 2), "Ед.": ""},
+        {"Показатель": "SRM p-value", "Значение": fmt_num(srm.get("p_value"), 6), "Ед.": ""},
+        {"Показатель": "SRM пройден", "Значение": "да" if srm.get("srm_ok") else "нет", "Ед.": ""},
+        {"Показатель": "Вывод", "Значение": result.get("recommendation_text", ""), "Ед.": ""},
+    ]
+    return pd.DataFrame(rows)
+
+
+def _segment_report_frame(profiles: pd.DataFrame) -> pd.DataFrame:
+    """Профили сегментов в виде таблицы отчёта."""
+    view = profiles.copy()
+    view.columns = [column_title(str(column)) for column in view.columns]
+    return view
+
+
+def _pvm_input(tables: dict[str, pd.DataFrame]) -> tuple[pd.DataFrame | None, str]:
+    """Собрать вход для PVM: объём (число сделок) и выручка по продукту."""
+    sales = tables.get("sales")
+    if sales is not None and not sales.empty and "amount" in sales.columns:
+        segment_col = "product_code" if "product_code" in sales.columns else None
+        frame = sales.copy()
+        frame["_volume"] = 1.0
+        frame["_value"] = pd.to_numeric(frame["amount"], errors="coerce").fillna(0.0)
+        if segment_col is None:
+            frame["_segment"] = "все продукты"
+            segment_col = "_segment"
+        grouped = frame.groupby(segment_col, as_index=False).agg(
+            volume=("_volume", "sum"), revenue=("_value", "sum"))
+        return grouped, segment_col
+    return None, ""
+
+
+def _run_forecast(series: pd.DataFrame, args: argparse.Namespace) -> dict:
+    """Прогноз по ряду: legacy (линейный тренд) или каскад моделей с бэктестом."""
+    model = getattr(args, "forecast_model", "legacy")
+    if model == "legacy":
+        return forecast_trend(series, horizon=args.forecast_h, band=args.band)
+    return forecast_advanced(series, horizon=args.forecast_h, band=args.band, method=model)
+
+
+# --------------------------------------------------------------------------
 # Основной сценарий
 # --------------------------------------------------------------------------
 
@@ -360,7 +474,53 @@ def run(args: argparse.Namespace) -> int:
             notes.append(f"Пропущена таблица {key!r}: её нет в словаре данных.")
             tables.pop(key)
 
+    # --- A/B-тест (--ab-test): считается до контроля качества, потому что
+    # нарушение SRM делает результат теста недействительным, а не предупреждением.
+    ab_result: dict | None = None
+    ab_source_name: str | None = None
+    if getattr(args, "ab_test", False):
+        group_col = getattr(args, "ab_group_col", "experiment_group")
+        ab_source_name, ab_frame = _ab_source(tables, group_col)
+        if ab_frame is None:
+            notes.append(
+                f"A/B-тест пропущен: в таблицах нет колонки групп «{group_col}»."
+            )
+        else:
+            metric_col = _ab_metric_column(ab_frame, getattr(args, "ab_metric", "value"))
+            if metric_col is None:
+                notes.append(
+                    "A/B-тест пропущен: в таблице "
+                    f"«{ab_source_name}» нет колонки метрики "
+                    f"(искали «{getattr(args, 'ab_metric', 'value')}», amount, balance, revenue)."
+                )
+            else:
+                ab_result = run_ab_test(
+                    ab_frame,
+                    group_col=group_col,
+                    metric_col=metric_col,
+                    denominator_col=getattr(args, "ab_denominator", None),
+                    pre_metric_col=getattr(args, "ab_pre_metric", None),
+                    metric_type=getattr(args, "ab_metric_type", "continuous"),
+                )
+
     quality = validate_inputs(tables)
+    if ab_result is not None and ab_result.get("available"):
+        srm = ab_result.get("srm_check", {})
+        srm_ok = bool(srm.get("srm_ok"))
+        overlap = int(ab_result.get("assignment_overlap_clients", 0))
+        quality.add(
+            "ab_srm_check",
+            srm_ok,
+            (f"SRM пройден: p={srm.get('p_value')}" if srm_ok
+             else f"Нарушен SRM: p={srm.get('p_value')} < 0.001 — результат теста недействителен"),
+        )
+        quality.add(
+            "ab_assignment_overlap",
+            overlap == 0,
+            (f"Клиентов в обеих группах: {overlap} — такие единицы исключены, "
+             "результат теста помечен недействительным"
+             if overlap else "Каждый клиент принадлежит одной группе"),
+        )
     log(args, f"Контроль качества: {len(quality.checks)} проверок, "
               f"{len(quality.failed)} fail, {len(quality.warned)} warn")
     for check in quality.failed + quality.warned:
@@ -511,6 +671,54 @@ def run(args: argparse.Namespace) -> int:
                     "assumption": season_result["assumption"],
                 }
 
+    # --- A/B-тест ---------------------------------------------------------
+    if ab_result is not None:
+        if ab_result.get("available"):
+            sections.append(("Эксперимент: A/B-тест", _ab_report_frame(ab_result),
+                             ab_result["assumption"]))
+            assumptions.append(ab_result["assumption"])
+            metrics_payload["sections"]["ab_test"] = ab_result
+            headline.append(headline_row(
+                "A/B: абсолютный эффект", ab_result.get("absolute_effect"), "",
+                f"{ab_source_name}.{group_col}"))
+            headline.append(headline_row(
+                "A/B: относительный эффект", ab_result.get("relative_uplift_pct"), "%",
+                f"{ab_source_name}.{group_col}"))
+        else:
+            warnings.append(f"A/B-тест не рассчитан: {ab_result.get('assumption', '')}")
+
+    # --- Сегментация клиентов (--segment) ---------------------------------
+    if getattr(args, "segment", False):
+        clients_table = tables.get("clients")
+        portfolio_table = tables.get("portfolio")
+        if clients_table is None or portfolio_table is None:
+            warnings.append("Сегментация пропущена: нужны таблицы clients и portfolio.")
+        else:
+            segmentation_result = segment_clients(
+                clients_table,
+                portfolio_table,
+                sales=tables.get("sales"),
+                enable_clustering=not getattr(args, "no_cluster", False),
+            )
+            if segmentation_result.get("available"):
+                sections.append(("Клиенты: сегменты RFM + Risk",
+                                 _segment_report_frame(segmentation_result["profiles"]),
+                                 segmentation_result["assumption"]))
+                assumptions.append(segmentation_result["assumption"])
+                metrics_payload["sections"]["segmentation"] = {
+                    "profiles": records(segmentation_result["profiles"]),
+                    "client_assignments": records(segmentation_result["client_assignments"]),
+                    "optimal_k": segmentation_result["optimal_k"],
+                    "silhouette_score": segmentation_result["silhouette_score"],
+                    "assumption": segmentation_result["assumption"],
+                }
+                top = segmentation_result["profiles"].iloc[0]
+                headline.append(headline_row(
+                    f"Крупнейший сегмент: {top['rfm_segment']}",
+                    top["portfolio_share_pct"], "%", "clients, portfolio"))
+            else:
+                warnings.append(f"Сегментация не рассчитана: {segmentation_result.get('assumption', '')}")
+
     # --- Финансы и юнит-экономика ----------------------------------------
     finance = tables.get("finance")
     if finance is not None and not finance.empty:
@@ -562,6 +770,28 @@ def run(args: argparse.Namespace) -> int:
                         "mode_used": season_result["mode_used"],
                         "assumption": season_result["assumption"],
                     }
+
+        # --- Прогноз выручки: только при явно выбранной модели (legacy-режим
+        # оставляет отчёт без изменений) ---
+        if getattr(args, "forecast_model", "legacy") != "legacy" and "period" in fin["rows"].columns:
+            revenue_series = (fin["rows"].groupby("period", as_index=False)["revenue"].sum()
+                              .rename(columns={"period": "period_start", "revenue": "value"})
+                              .sort_values("period_start"))
+            revenue_forecast = _run_forecast(revenue_series, args)
+            if revenue_forecast.get("available"):
+                frame = pd.DataFrame({
+                    "Период": [period[:7] if period.endswith("-01") else period
+                               for period in revenue_forecast["periods"]],
+                    **{name: values for name, values in revenue_forecast["scenarios"].items()},
+                })
+                sections.append(("Финансы: прогноз выручки", frame,
+                                 f"Модель: {revenue_forecast.get('method_used')}; "
+                                 f"MAE: {revenue_forecast['mae']}; "
+                                 f"sMAPE: {revenue_forecast.get('smape_pct')} %"))
+                metrics_payload["sections"]["finance_forecast"] = revenue_forecast
+                headline.append(headline_row(
+                    "Прогноз выручки (базовый сценарий)",
+                    revenue_forecast["scenarios"]["базовый"][0] / 1e6, "млн руб.", "finance", digits=1))
 
     # --- Макро ------------------------------------------------------------
     indicator = None
@@ -621,7 +851,7 @@ def run(args: argparse.Namespace) -> int:
             except Exception as e:
                 warnings.append(f"Ошибка построения графика аномалий: {e}")
 
-        forecast = forecast_trend(series, horizon=args.forecast_h, band=args.band)
+        forecast = _run_forecast(series, args)
         metrics_payload["sections"]["forecast"] = forecast
         if forecast.get("available"):
             assumptions.append(forecast["assumption"])
@@ -630,8 +860,16 @@ def run(args: argparse.Namespace) -> int:
                            for period in forecast["periods"]],
                 **{name: values for name, values in forecast["scenarios"].items()},
             })
-            sections.append(("Прогноз: значения", frame,
-                             f"MAE: {forecast['mae']}; MAPE: {forecast['mape_pct'] if forecast['mape_pct'] is not None else '— (все факты в бэктесте = 0)'} %"))
+            model_note = ""
+            if forecast.get("method_used"):
+                model_note = (f"Модель: {forecast['method_used']}; "
+                              f"MAE: {forecast['mae']}; "
+                              f"sMAPE: {forecast.get('smape_pct')} %; "
+                              f"MASE: {forecast.get('mase')}")
+            else:
+                model_note = (f"MAE: {forecast['mae']}; "
+                              f"MAPE: {forecast['mape_pct'] if forecast['mape_pct'] is not None else '— (все факты в бэктесте = 0)'} %")
+            sections.append(("Прогноз: значения", frame, model_note))
             # Workaround for matplotlib tight_layout recursion bug in Python 3.14
             try:
                 chart = chart_forecast(forecast, charts_dir / "forecast.png")
@@ -671,6 +909,31 @@ def run(args: argparse.Namespace) -> int:
         if "html" in formats:
             build_dashboard(survey, indicator, out_dir / "dashboard.html",
                             title=f"Дашборд: {indicator}")
+
+        # --- Лаговые связи макропоказателей (--drivers) ---
+        if getattr(args, "drivers", False):
+            industry_frame = survey[survey["industry"] == industry]
+            lead_lag = macro_lead_lag(
+                industry_frame,
+                period_col="period" if "period" in industry_frame.columns else "period_start",
+                max_lag=getattr(args, "drivers_max_lag", 3),
+            )
+            if lead_lag.get("available"):
+                sections.append(("Макро: опережающие связи (Грейнджер)", lead_lag["links"],
+                                 lead_lag["assumption"]))
+                assumptions.append(lead_lag["assumption"])
+                metrics_payload["sections"]["macro_lead_lag"] = {
+                    "links": records(lead_lag["links"]),
+                    "max_lag_used": lead_lag["max_lag_used"],
+                    "periods_analyzed": lead_lag["periods_analyzed"],
+                    "significant_count": lead_lag["significant_count"],
+                    "assumption": lead_lag["assumption"],
+                }
+                headline.append(headline_row(
+                    "Значимых лаговых связей (FDR < 0.05)", lead_lag["significant_count"], "шт.",
+                    "macro_survey"))
+            else:
+                warnings.append(f"Лаговая причинность не рассчитана: {lead_lag.get('assumption', '')}")
 
     # --- Рыночные таблицы (macro_*) --------------------------------------
     macro_specs = {
@@ -756,6 +1019,69 @@ def run(args: argparse.Namespace) -> int:
                 ))
             if not comparison["finance_comparison"].empty:
                 sections.append(("Сравнение: P&L", comparison["finance_comparison"], ""))
+
+            # --- Факторный разбор отклонений (--drivers) ---
+            if getattr(args, "drivers", False):
+                pvm_base, pvm_segment = _pvm_input(tables_base)
+                pvm_target, _ = _pvm_input(tables_target)
+                if pvm_base is not None and pvm_target is not None:
+                    pvm = pvm_decomposition(
+                        pvm_base, pvm_target,
+                        segment_col=pvm_segment, volume_col="volume", value_col="revenue",
+                    )
+                    if pvm.get("available"):
+                        effects = pvm["effects"]
+                        frame = pd.DataFrame([
+                            {"Эффект": "Объём", "Вклад": effects["volume_effect"]},
+                            {"Эффект": "Продуктовый микс", "Вклад": effects["mix_effect"]},
+                            {"Эффект": "Ставка (цена)", "Вклад": effects["rate_effect"]},
+                            {"Эффект": "Взаимодействие", "Вклад": effects["interaction_effect"]},
+                            {"Эффект": "Итого изменение", "Вклад": pvm["total_delta"]},
+                        ])
+                        sections.append((f"Факторный разбор PVM ({label_base} → {label_target})",
+                                         frame, pvm["assumption"]))
+                        metrics_payload["sections"]["pvm"] = {
+                            "effects": pvm["effects"],
+                            "total_delta": pvm["total_delta"],
+                            "by_segment": records(pvm["by_segment"]),
+                            "assumption": pvm["assumption"],
+                        }
+                        headline.append(headline_row("PVM: вклад объёма", effects["volume_effect"],
+                                                    "руб.", "sales"))
+                        headline.append(headline_row("PVM: вклад ставки", effects["rate_effect"],
+                                                    "руб.", "sales"))
+                else:
+                    warnings.append("PVM-разбор пропущен: в выгрузках нет таблицы sales с суммой сделки.")
+
+                port_base = tables_base.get("portfolio")
+                if port_base is None:
+                    port_base = tables_base.get("accounts")
+                port_target = tables_target.get("portfolio")
+                if port_target is None:
+                    port_target = tables_target.get("accounts")
+                if port_base is not None and port_target is not None:
+                    par_shift = par_shift_decomposition(port_base, port_target)
+                    if par_shift.get("available"):
+                        frame = pd.DataFrame([
+                            {"Эффект": "Риск внутри продуктов", "Вклад, п.п.": par_shift["within_risk_effect_pp"]},
+                            {"Эффект": "Сдвиг структуры портфеля", "Вклад, п.п.": par_shift["structural_mix_effect_pp"]},
+                            {"Эффект": "Итого изменение PAR", "Вклад, п.п.": par_shift["delta_par_pp"]},
+                        ])
+                        sections.append((f"Разложение сдвига PAR ({label_base} → {label_target})",
+                                         frame, par_shift["assumption"]))
+                        metrics_payload["sections"]["par_shift"] = {
+                            "par_base_pct": par_shift["par_base_pct"],
+                            "par_target_pct": par_shift["par_target_pct"],
+                            "delta_par_pp": par_shift["delta_par_pp"],
+                            "within_risk_effect_pp": par_shift["within_risk_effect_pp"],
+                            "structural_mix_effect_pp": par_shift["structural_mix_effect_pp"],
+                            "by_segment": records(par_shift["by_segment"]),
+                            "assumption": par_shift["assumption"],
+                        }
+                        headline.append(headline_row("PAR: вклад риска внутри продуктов",
+                                                    par_shift["within_risk_effect_pp"], "п.п.",
+                                                    "portfolio.dpd"))
+
             metrics_payload["sections"]["comparison"] = {
                 "labels": comparison["labels"],
                 "schema": {k: records(v) if hasattr(v, "to_dict") else v

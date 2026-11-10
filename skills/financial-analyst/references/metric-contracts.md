@@ -46,7 +46,8 @@
 | `structural_mix_effect_pp` | продукт | $0.5 \cdot (r_{i,0} + r_{i,1}) \cdot (w_{i,1} - w_{i,0})$ | — | баланс = 0 → `null` | portfolio |
 | `granger_p_fdr` | пара индикаторов | F-статистика Грейнджера с поправкой Бенджамини — Хохберга | — | $T < 8$ или $\sigma = 0$ → `null` | macro_survey |
 | `ab_srm_p_value` | эксперимент | $\chi^2$ отклонения фактического сплита от целевого | — | $p < 0.001$ → блокировка выводов (`invalid_srm_detected`) | эксперимент |
-| `ab_absolute_effect` | единица `client_id` | среднее (или ratio) в `treatment` минус `control` | — | $< 2$ клиентов в группе → `null` | эксперимент |
+| `ab_absolute_effect` | единица `client_id` | среднее (или ratio) в `treatment` минус `control` | — | $< 2$ клиентов в группе → `null`; клиент в обеих группах → результат недействителен | эксперимент |
+| `assignment_overlap_clients` | эксперимент | число клиентов, попавших в обе группы | — | $> 0$ → `invalid_assignment_overlap`, такие единицы исключены | эксперимент |
 | `did_att_effect` | панель (регион × период) | коэффициент при `Treat × Post` (OLS с HC1 SE) | — | нет вариации до/после → `null` | панель |
 | `rfm_segment` | клиент (`client_id`) | правило по квантилям $R, F, M$ и `max_dpd` | — | `max_dpd > 0` → всегда `Просроченные (DPD > 0)` | clients, portfolio, sales |
 | `bridge_balance_delta` | корзина клиентов | $\sum (B_{i,1} - B_{i,0})$ внутри корзины (`New`, `Churned`, `Expansion`, `Contraction`) | — | сумма 4 корзин строго равна $\Delta \text{Total}$ | portfolio (2 среза) |
@@ -57,9 +58,9 @@
 
 > Строки `pvm_*`, `within_risk_effect_pp`, `structural_mix_effect_pp`, `granger_p_fdr`,
 > `ab_srm_p_value`, `ab_absolute_effect`, `did_att_effect`, `rfm_segment`, `smape_pct`,
-> `mase` описывают **дорожную карту версии 2.1.0**: модулей `drivers`, `experiments`,
-> `segmentation` и `forecast` в пакете пока нет, эти метрики не считаются.
-> Реализованы строки от `accounts` до `mae` (включая `mape_pct`) и Bridge-метрики.
+> `mase` реализованы в версии 2.1.0 модулями `drivers`, `experiments`, `segmentation`
+> и `forecast`; вызываются флагами `--drivers`, `--ab-test`, `--segment` и
+> `--forecast-model`.
 
 ## Правила
 

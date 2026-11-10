@@ -113,6 +113,28 @@ COLUMN_TITLES = {
     "delta_pct_note": "Примечание",
     "value_base": "Значение (база)",
     "value_target": "Значение (цель)",
+    # Сегментация клиентов (RFM + Risk и кластеризация)
+    "rfm_segment": "Сегмент",
+    "cluster_id": "Кластер",
+    "portfolio_balance": "Остаток, руб.",
+    "mean_balance": "Средний остаток, руб.",
+    "avg_products": "Продуктов на клиента",
+    "median_recency_days": "Медиана дней с активности",
+    "delinquent_share_pct": "Доля с просрочкой, %",
+    "clients_share_pct": "Доля клиентов, %",
+    "portfolio_share_pct": "Доля портфеля, %",
+    "products_count": "Продуктов",
+    "recency_days": "Дней с активности",
+    "max_dpd": "Макс. DPD, дн.",
+    # Лаговые связи макропоказателей (тест Грейнджера)
+    "cause_indicator": "Опережающий показатель",
+    "effect_indicator": "Откликающийся показатель",
+    "best_lag": "Лаг",
+    "lag_corr": "Корреляция на лаге",
+    "granger_f": "F-статистика",
+    "p_value_raw": "p-value (исходный)",
+    "p_value_fdr": "p-value (FDR)",
+    "significant_fdr": "Значимо (FDR)",
 }
 
 

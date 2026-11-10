@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "financial-analyst-skill"
-version = "2.0.1"
+version = "2.1.0"
 description = "Financial analyst skill for Hermes Agent: portfolio, funnel, unit economics, forecasting"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -13,6 +13,7 @@ authors = [{name = "Denis Zakharov"}]
 dependencies = [
     "pandas==2.2.3",
     "numpy==1.26.4",
+    "scipy==1.15.3",
     "matplotlib==3.9.4",
     "plotly==5.24.1",
     "python-docx==1.1.2",

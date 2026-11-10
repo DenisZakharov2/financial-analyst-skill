@@ -9,10 +9,9 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from .core import drop_total_rows, parse_period, period_ym
+from .core import STAGE_ORDER, STAGE_RANK, drop_total_rows, parse_period, period_ym
 
-STAGE_ORDER = ["лид", "обращение", "заявка", "одобрение", "договор", "активация"]
-STAGE_RANK = {stage: i + 1 for i, stage in enumerate(STAGE_ORDER)}
+# Порядок этапов воронки определён в core: контроль качества использует его же.
 
 # Сколько месяцев покрывает один период каждого типа.
 PERIOD_MONTHS = {"M": 1, "D": 1, "Q": 3, "Y": 12}

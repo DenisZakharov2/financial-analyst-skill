@@ -394,6 +394,12 @@ def period_labels(values: pd.Series, fmt: str = "%Y-%m") -> pd.Series:
     return pd.Series(out, index=values.index)
 
 
+# Этапы воронки в порядке продвижения клиента. Определение живёт в core,
+# чтобы контроль качества не зависел от metrics (иначе возникает циклический
+# импорт): проверки хронологии событий и расчёт TAT используют один порядок.
+STAGE_ORDER: list[str] = ["лид", "обращение", "заявка", "одобрение", "договор", "активация"]
+STAGE_RANK: dict[str, int] = {stage: index + 1 for index, stage in enumerate(STAGE_ORDER)}
+
 # Итоговые строки: по словарю данных это `product_code = 'ALL'`.
 # В выгрузках встречаются и другие обозначения итогов — их тоже нельзя
 # суммировать с детализацией.
@@ -490,6 +496,42 @@ TABLE_ALIASES = {
     "sales": "applications",
     "funnel_events": "funnel",
 }
+
+
+def _check_funnel_monotonic(events: pd.DataFrame, report: QualityReport) -> None:
+    """Проверить, что этапы заявки идут в хронологическом порядке.
+
+    Событие более позднего этапа с датой раньше предыдущего этапа означает
+    либо перенос дат, либо разметку этапов по факту, а не по ходу: TAT по
+    такой выгрузке посчитать нельзя, поэтому это предупреждение, а не ошибка.
+    """
+    entity_col = next(
+        (column for column in ("application_id", "client_id") if column in events.columns), None)
+    date_col = next(
+        (column for column in ("event_date", "stage_date", "application_date")
+         if column in events.columns), None)
+    if entity_col is None or date_col is None or "stage" not in events.columns:
+        return
+
+    frame = events[[entity_col, date_col, "stage"]].copy()
+    frame["_rank"] = [STAGE_RANK.get(str(stage).strip().lower(), 0) for stage in frame["stage"]]
+    frame["_date"] = [parse_period(value)[0] for value in frame[date_col]]
+    frame = frame[frame["_rank"] > 0]
+    if frame.empty:
+        return
+
+    broken = 0
+    for _, group in frame.groupby(entity_col, sort=False):
+        ordered = group.sort_values("_date")
+        ranks = list(ordered["_rank"])
+        if any(ranks[index] < ranks[index - 1] for index in range(1, len(ranks))):
+            broken += 1
+    report.add(
+        "funnel_timestamps_monotonic",
+        broken == 0,
+        f"Заявок с этапами вне хронологического порядка: {broken} — TAT по ним не считается",
+        warn_only=True,
+    )
 
 
 def validate_inputs(tables: dict[str, pd.DataFrame]) -> QualityReport:
@@ -599,6 +641,12 @@ def validate_inputs(tables: dict[str, pd.DataFrame]) -> QualityReport:
             report.add("sales_amount_non_negative", bool((amount.fillna(0) >= 0).all()),
                        "Отрицательные суммы в заявках", warn_only=True)
 
+    funnel_table = tables.get("funnel_events")
+    if funnel_table is None:
+        funnel_table = tables.get("funnel")
+    if funnel_table is not None and not funnel_table.empty:
+        _check_funnel_monotonic(funnel_table, report)
+
     if finance is not None:
         if {"period", "product_code"} <= set(finance.columns):
             grain = period_grain(finance["period"])
@@ -609,6 +657,13 @@ def validate_inputs(tables: dict[str, pd.DataFrame]) -> QualityReport:
             dup = int(grain_frame.duplicated().sum())
             report.add("finance_grain_unique", dup == 0,
                        f"Дублей period+product_code: {dup}")
+            # Длины ряда хватает для сезонных индексов только при двух полных
+            # циклах: иначе скилл показывает тренд и честно об этом пишет.
+            months = len({period_ym(v) for v in finance["period"] if period_ym(v)})
+            report.add("min_series_length_for_seasonality", months >= 24,
+                       f"Периодов в finance: {months}; для сезонных индексов нужно 24 месяца "
+                       "(два полных цикла) — будет показан только тренд",
+                       warn_only=True)
         if "product_code" in finance.columns:
             all_rows = int(finance["product_code"].astype(str).str.strip().str.upper()
                            .isin(TOTAL_CODES).sum())
