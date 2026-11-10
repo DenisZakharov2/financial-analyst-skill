@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import pandas as pd
 
+from .core import drop_total_rows
+
 
 def compare_schemas(
     tables_base: dict[str, pd.DataFrame],
@@ -50,7 +52,7 @@ def portfolio_bridge(
     portfolio_target: pd.DataFrame,
     entity_col: str = "client_id",
 ) -> dict:
-    """Разложить изменение баланса портфеля между двумя выгрузками на 4 клиентские корзины (Bridge)."""
+    """Разложить изменение баланса портфеля между двумя выгрузками на клиентские корзины (Bridge)."""
     for df in (portfolio_base, portfolio_target):
         if df is None or df.empty or entity_col not in df.columns or "balance" not in df.columns:
             return {
@@ -59,13 +61,20 @@ def portfolio_bridge(
                 "assumption": f"В таблицах портфеля отсутствуют колонки '{entity_col}' или 'balance'.",
             }
 
-    b = portfolio_base.copy()
-    t = portfolio_target.copy()
+    b, _ = drop_total_rows(portfolio_base.copy(), group=())
+    t, _ = drop_total_rows(portfolio_target.copy(), group=())
+    if "status" in b.columns:
+        b = b[b["status"].astype(str).str.strip().str.lower() != "закрыт"]
+    if "status" in t.columns:
+        t = t[t["status"].astype(str).str.strip().str.lower() != "закрыт"]
+
     b["bal_0"] = pd.to_numeric(b["balance"], errors="coerce").fillna(0.0)
     t["bal_1"] = pd.to_numeric(t["balance"], errors="coerce").fillna(0.0)
 
     b_agg = b.groupby(entity_col, as_index=False)["bal_0"].sum()
     t_agg = t.groupby(entity_col, as_index=False)["bal_1"].sum()
+    b_agg = b_agg[b_agg["bal_0"] > 0]
+    t_agg = t_agg[t_agg["bal_1"] > 0]
 
     merged = pd.merge(b_agg, t_agg, on=entity_col, how="outer", indicator=True)
     merged["bal_0"] = merged["bal_0"].fillna(0.0)
@@ -75,13 +84,15 @@ def portfolio_bridge(
     cond_new = merged["_merge"] == "right_only"
     cond_churn = merged["_merge"] == "left_only"
     cond_exp = (merged["_merge"] == "both") & (merged["delta"] > 0.0)
-    cond_con = (merged["_merge"] == "both") & (merged["delta"] <= 0.0)
+    cond_con = (merged["_merge"] == "both") & (merged["delta"] < 0.0)
+    cond_flat = (merged["_merge"] == "both") & (merged["delta"] == 0.0)
 
     buckets = [
         ("1. Новые клиенты (New)", merged[cond_new]),
         ("2. Ушедшие / Закрытые (Churned)", merged[cond_churn]),
         ("3. Рост удержанных (Retained Expansion)", merged[cond_exp]),
-        ("4. Сжатие / амортизация удержанных (Retained Contraction)", merged[cond_con]),
+        ("4. Сжатие удержанных (Retained Contraction)", merged[cond_con]),
+        ("5. Без изменений удержанных (Retained Flat)", merged[cond_flat]),
     ]
 
     total_0 = float(merged["bal_0"].sum())
@@ -98,7 +109,7 @@ def portfolio_bridge(
                 "balance_target": round(float(sub["bal_1"].sum()), 2),
                 "balance_delta": round(float(sub["delta"].sum()), 2),
                 "contribution_to_growth_pct": (
-                    round(float(sub["delta"].sum() / total_0 * 100.0), 2) if total_0 > 0 else 0.0
+                    round(float(sub["delta"].sum()) / total_0 * 100.0, 2) if total_0 > 0 else 0.0
                 ),
             }
         )
@@ -107,7 +118,7 @@ def portfolio_bridge(
     base_count = int(len(b_agg))
     retention_rate_pct = round(retained_count / base_count * 100.0, 2) if base_count > 0 else 0.0
     nrr_pct = (
-        round(float(merged[merged["_merge"] == "both"]["bal_1"].sum() / total_0 * 100.0), 2)
+        round(float(merged[merged["_merge"] == "both"]["bal_1"].sum()) / total_0 * 100.0, 2)
         if total_0 > 0
         else 0.0
     )
@@ -122,8 +133,8 @@ def portfolio_bridge(
         "net_dollar_retention_pct": nrr_pct,
         "bridge_table": pd.DataFrame(rows),
         "assumption": (
-            f"Bridge-анализ выполнен по ключу '{entity_col}'. Сумма четырёх корзин точно равна "
-            f"общему изменению портфеля ({total_delta:,.2f})."
+            f"Bridge-анализ выполнен по ключу '{entity_col}' после исключения итоговых строк ALL и закрытых счетов. "
+            f"Сумма пяти корзин точно равна общему изменению портфеля ({total_delta:,.2f})."
         ),
     }
 
@@ -136,23 +147,31 @@ def compare_snapshots(
 ) -> dict:
     """Комплексное сравнение двух выгрузок: схема, портфельный Bridge и ключевые финансовые дельты."""
     schema_report = compare_schemas(tables_base, tables_target)
-    bridge_report = portfolio_bridge(
-        tables_base.get("portfolio", pd.DataFrame()),
-        tables_target.get("portfolio", pd.DataFrame()),
-    )
+    port_b = tables_base.get("portfolio")
+    if port_b is None:
+        port_b = tables_base.get("accounts", pd.DataFrame())
+    port_t = tables_target.get("portfolio")
+    if port_t is None:
+        port_t = tables_target.get("accounts", pd.DataFrame())
+    bridge_report = portfolio_bridge(port_b, port_t)
 
     fin_b = tables_base.get("finance")
     fin_t = tables_target.get("finance")
     fin_deltas: list[dict] = []
     if fin_b is not None and fin_t is not None and not fin_b.empty and not fin_t.empty:
+        fin_b_clean, _ = drop_total_rows(fin_b, group=("period",) if "period" in fin_b.columns else ())
+        fin_t_clean, _ = drop_total_rows(fin_t, group=("period",) if "period" in fin_t.columns else ())
         num_cols = [
             c
-            for c in ("interest_income", "fee_income", "funding_cost", "opex", "reserve_expense", "tax", "marketing_cost", "revenue", "net_profit")
-            if c in fin_b.columns and c in fin_t.columns
+            for c in (
+                "interest_income", "fee_income", "premium",
+                "funding_cost", "opex", "reserve_expense", "tax", "marketing_cost",
+            )
+            if c in fin_b_clean.columns and c in fin_t_clean.columns
         ]
         for col in num_cols:
-            v0 = float(pd.to_numeric(fin_b[col], errors="coerce").fillna(0.0).sum())
-            v1 = float(pd.to_numeric(fin_t[col], errors="coerce").fillna(0.0).sum())
+            v0 = float(pd.to_numeric(fin_b_clean[col], errors="coerce").fillna(0.0).sum())
+            v1 = float(pd.to_numeric(fin_t_clean[col], errors="coerce").fillna(0.0).sum())
             delta = v1 - v0
             pct = (delta / abs(v0) * 100.0) if abs(v0) > 1e-9 else 0.0
             fin_deltas.append(

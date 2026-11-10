@@ -79,40 +79,8 @@ def test_macro_tables_are_analyzed(tmp_path, date_strings_fixture):
     assert "Вклады и депозиты: динамика" in names
 
 
-def _months_from_str(date_str: str) -> int:
-    """Convert YYYY-MM string to months since epoch."""
-    year, month = map(int, date_str.split("-"))
-    return year * 12 + month - 1
-
-
-def _str_from_months(months: int) -> str:
-    """Convert months since epoch to YYYY-MM string."""
-    year = months // 12
-    month = months % 12 + 1
-    return f"{year:04d}-{month:02d}"
-
-
-def date_strings(start: str, periods: int, freq: str = "M") -> list[str]:
-    """Generate list of YYYY-MM strings without pandas datetime operations."""
-    if freq == "M":
-        step = 1
-    elif freq == "Q":
-        step = 3
-    elif freq == "Y":
-        step = 12
-    else:
-        step = 1
-
-    start_months = _months_from_str(start)
-    result = []
-    for i in range(periods):
-        months = start_months + i * step
-        result.append(_str_from_months(months))
-    return result
-
-
-def _write_survey(data, periods: int = 8) -> None:
-    dates = date_strings("2023-01", periods)
+def _write_survey(data, periods: int = 8, date_strings_fixture=None) -> None:
+    dates = date_strings_fixture("2023-01", periods)
     rows = [
         {"period": date,
          "industry": industry,
@@ -127,7 +95,7 @@ def _write_survey(data, periods: int = 8) -> None:
 def test_macro_survey_csv_is_normalized(tmp_path, date_strings_fixture):
     data = tmp_path / "survey"
     data.mkdir()
-    _write_survey(data)
+    _write_survey(data, date_strings_fixture=date_strings_fixture)
     out = tmp_path / "out"
     assert main(["--data-dir", str(data), "--out", str(out), "--format", "xlsx", "--quiet"]) == 0
     metrics = json.loads((out / "metrics.json").read_text(encoding="utf-8"))
@@ -139,7 +107,7 @@ def test_macro_survey_csv_is_normalized(tmp_path, date_strings_fixture):
 def test_unknown_indicator_returns_data_error(tmp_path, date_strings_fixture):
     data = tmp_path / "survey"
     data.mkdir()
-    _write_survey(data)
+    _write_survey(data, date_strings_fixture=date_strings_fixture)
     code = main(["--data-dir", str(data), "--out", str(tmp_path / "out"),
                  "--format", "xlsx", "--indicator", "Нет такого", "--quiet"])
     assert code == 2

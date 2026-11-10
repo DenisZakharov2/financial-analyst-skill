@@ -1,42 +1,36 @@
-"""Расчёт поэтапного времени прохождения воронки (TAT) и декомпозиции сезонности.
-
-Модуль предназначен для пакета `finanalyst` (skills/financial-analyst/scripts/finanalyst/seasonality_tat.py).
-Согласован со справочником `references/data-dictionary.md`, `STAGE_ORDER` из `metrics.py`
-и реальной структурой `assets/sample/funnel_events.csv`, `sales.csv` и `finance.csv`.
-"""
+"""Расчёт поэтапного времени прохождения воронки (TAT) и декомпозиции сезонности."""
 
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 
-STAGE_ORDER: list[str] = ["лид", "обращение", "заявка", "одобрение", "договор", "активация"]
-STAGE_RANK: dict[str, int] = {stage: idx + 1 for idx, stage in enumerate(STAGE_ORDER)}
+from .core import drop_total_rows, parse_period
+from .metrics import STAGE_ORDER, STAGE_RANK, _normalize_stage
+
 I_NAT = np.iinfo(np.int64).min
 
 
-def _normalize_stage(value: object) -> str:
-    if pd.isna(value):
-        return ""
-    return str(value).strip().lower()
-
-
 def _parse_dates_to_ns(date_strings: np.ndarray) -> np.ndarray:
-    """Parse date strings directly to int64 nanoseconds using numpy datetime64.
-
-    Avoids pandas datetime64 segfault bug in pandas 2.2.3 + numpy 2.1.3.
-    Invalid dates become I_NAT.
-    """
+    """Разобрать массив дат/периодов в наносекунды int64 с фолбэком на parse_period."""
     result = np.full(len(date_strings), I_NAT, dtype="int64")
     for i, d in enumerate(date_strings):
         if pd.isna(d) or d == "":
             continue
+        s = str(d).strip()
         try:
-            # Parse as numpy datetime64[ns] then convert to int64
-            dt = np.datetime64(str(d), "ns")
+            dt = np.datetime64(s, "ns")
             result[i] = dt.astype("int64")
+            continue
         except (ValueError, TypeError):
             pass
+        ts, _ = parse_period(s)
+        if pd.notna(ts):
+            try:
+                iso = f"{int(ts.year):04d}-{int(ts.month):02d}-{int(ts.day):02d}"
+                result[i] = np.datetime64(iso, "ns").astype("int64")
+            except (ValueError, TypeError, AttributeError):
+                pass
     return result
 
 
@@ -46,7 +40,7 @@ def _ns_to_datetime_str(ns_array: np.ndarray) -> np.ndarray:
     for i, ns in enumerate(ns_array):
         if ns != I_NAT:
             dt = np.datetime64(int(ns), "ns")
-            result[i] = str(dt)[:10]  # YYYY-MM-DD
+            result[i] = str(dt)[:10]
     return result
 
 
@@ -77,11 +71,7 @@ def funnel_tat(
     sla_days: dict[str, float] | float = 3.0,
     reference_date: str | None = None,
 ) -> dict:
-    """Рассчитать время прохождения этапов воронки (TAT), выполнение SLA и зависший бэклог.
-
-    Поддерживает таблицу `funnel_events` (`application_id`, `stage`, `event_date`, `product_code`, `channel`)
-    и опциональное обогащение из `sales` (`application_id`, `manager_id`, `result`) без ошибки выжившего.
-    """
+    """Рассчитать время прохождения этапов воронки (TAT), выполнение SLA и зависший бэклог."""
     if events is None or events.empty:
         return {
             "available": False,
@@ -94,34 +84,28 @@ def funnel_tat(
 
     df = events.copy()
     entity_col = "application_id" if "application_id" in df.columns else "client_id"
-    if entity_col not in df.columns or "stage" not in df.columns or "event_date" not in df.columns:
+    date_col = next((c for c in ("event_date", "stage_date", "application_date") if c in df.columns), None)
+    if entity_col not in df.columns or "stage" not in df.columns or date_col is None:
         return {
             "available": False,
             "by_transition": pd.DataFrame(),
             "by_segment": pd.DataFrame(),
             "aging_backlog": pd.DataFrame(),
             "survival_curve": pd.DataFrame(),
-            "assumption": "В таблице funnel_events отсутствуют обязательные колонки (application_id/client_id, stage, event_date).",
+            "assumption": "В таблице воронки отсутствуют обязательные колонки (application_id/client_id, stage, event_date).",
         }
 
-    # Convert to numpy arrays early - avoid pandas datetime operations
-    # Avoid .map() which triggers segfault in pandas 2.2.3/numpy 2.1.3
-    stage_norm = np.array([_normalize_stage(s) for s in df["stage"].to_numpy()])
+    stage_norm = np.array([_normalize_stage(s) if pd.notna(s) else "" for s in df["stage"].to_numpy()])
     stage_rank = np.array([STAGE_RANK.get(s, 0) for s in stage_norm], dtype=int)
     entity_ids = df[entity_col].to_numpy()
-    event_dt_ns = _parse_dates_to_ns(df["event_date"].to_numpy())
+    event_dt_ns = _parse_dates_to_ns(df[date_col].to_numpy())
 
     has_product = "product_code" in df.columns
     has_channel = "channel" in df.columns
     product_codes = df["product_code"].to_numpy() if has_product else np.array([""] * len(entity_ids))
     channels = df["channel"].to_numpy() if has_channel else np.array([""] * len(entity_ids))
 
-    # Filter valid rows
-    mask = (
-        pd.notna(entity_ids)
-        & (stage_rank > 0)
-        & (event_dt_ns != I_NAT)
-    )
+    mask = pd.notna(entity_ids) & (stage_rank > 0) & (event_dt_ns != I_NAT)
     entity_ids = entity_ids[mask]
     stage_norm = stage_norm[mask]
     stage_rank = stage_rank[mask]
@@ -139,7 +123,6 @@ def funnel_tat(
             "assumption": "После очистки дат и этапов не осталось валидных событий воронки.",
         }
 
-    # Sort by entity, stage_rank, event_dt
     sort_idx = np.lexsort((event_dt_ns, stage_rank, entity_ids))
     entity_ids = entity_ids[sort_idx]
     stage_norm = stage_norm[sort_idx]
@@ -148,13 +131,17 @@ def funnel_tat(
     product_codes = product_codes[sort_idx]
     channels = channels[sort_idx]
 
-    # Group by entity, stage_rank, stage_norm (take first event_dt per group)
     grouped_data = []
     i = 0
     n = len(entity_ids)
     while i < n:
         j = i + 1
-        while j < n and entity_ids[j] == entity_ids[i] and stage_rank[j] == stage_rank[i] and stage_norm[j] == stage_norm[i]:
+        while (
+            j < n
+            and entity_ids[j] == entity_ids[i]
+            and stage_rank[j] == stage_rank[i]
+            and stage_norm[j] == stage_norm[i]
+        ):
             j += 1
         grouped_data.append({
             "entity": entity_ids[i],
@@ -167,17 +154,6 @@ def funnel_tat(
         i = j
 
     grouped_n = len(grouped_data)
-    if grouped_n == 0:
-        return {
-            "available": False,
-            "by_transition": pd.DataFrame(),
-            "by_segment": pd.DataFrame(),
-            "aging_backlog": pd.DataFrame(),
-            "survival_curve": pd.DataFrame(),
-            "assumption": "После группировки не осталось валидных событий.",
-        }
-
-    # Extract arrays
     g_entity = np.array([d["entity"] for d in grouped_data], dtype=object)
     g_stage_rank = np.array([d["stage_rank"] for d in grouped_data], dtype=int)
     g_stage_norm = np.array([d["stage_norm"] for d in grouped_data], dtype=object)
@@ -185,7 +161,6 @@ def funnel_tat(
     g_product = np.array([d["product_code"] for d in grouped_data], dtype=object)
     g_channel = np.array([d["channel"] for d in grouped_data], dtype=object)
 
-    # Compute next_* using manual iteration
     next_stage = np.full(grouped_n, "", dtype=object)
     next_rank = np.full(grouped_n, -1, dtype=int)
     next_dt_ns = np.full(grouped_n, I_NAT, dtype="int64")
@@ -196,15 +171,12 @@ def funnel_tat(
             next_rank[i] = g_stage_rank[i + 1]
             next_dt_ns[i] = g_event_dt_ns[i + 1]
 
-    # Compute TAT
-    tat_ns = next_dt_ns - g_event_dt_ns
-    tat_days = np.where(
-        (next_dt_ns != I_NAT) & (g_event_dt_ns != I_NAT) & (tat_ns >= 0),
-        tat_ns / 86400_000_000_000.0,
-        np.nan,
+    valid_transition = (next_dt_ns != I_NAT) & (g_event_dt_ns != I_NAT) & (next_dt_ns >= g_event_dt_ns)
+    tat_days = np.full(grouped_n, np.nan, dtype="float64")
+    tat_days[valid_transition] = (
+        (next_dt_ns[valid_transition] - g_event_dt_ns[valid_transition]) / 86400_000_000_000.0
     )
 
-    # Build valid transitions
     valid_mask = ~np.isnan(tat_days) & (tat_days >= 0)
     if not np.any(valid_mask):
         return {
@@ -218,22 +190,18 @@ def funnel_tat(
 
     v_transition = g_stage_norm[valid_mask] + " -> " + next_stage[valid_mask]
     v_from_stage = g_stage_norm[valid_mask]
-    next_stage[valid_mask]
     v_tat = tat_days[valid_mask]
-    g_product[valid_mask]
-    g_channel[valid_mask]
 
     def _threshold_for(trans_name: str, from_stage: str) -> float:
         if isinstance(sla_days, dict):
             return float(sla_days.get(trans_name, sla_days.get(from_stage, 3.0)))
         return float(sla_days)
 
-    # By transition
     transition_rows: list[dict] = []
     for trans_name in np.unique(v_transition):
-        mask = v_transition == trans_name
-        vals = v_tat[mask]
-        from_stage = v_from_stage[mask][0]
+        t_mask = v_transition == trans_name
+        vals = v_tat[t_mask]
+        from_stage = v_from_stage[t_mask][0]
         thresh = _threshold_for(str(trans_name), str(from_stage))
         p25, p50, p75, p90, p95 = np.percentile(vals, [25, 50, 75, 90, 95])
         transition_rows.append(
@@ -250,9 +218,9 @@ def funnel_tat(
                 "sla_compliance_pct": round(float(np.mean(vals <= thresh) * 100.0), 2),
             }
         )
+
     by_transition_df = pd.DataFrame(transition_rows)
 
-    # App span
     unique_entities = np.unique(g_entity)
     app_span_rows = []
     for ent in unique_entities:
@@ -263,8 +231,11 @@ def funnel_tat(
         ent_product = g_product[ent_mask]
         ent_channel = g_channel[ent_mask]
 
-        first_idx = np.argmin(ent_event_dt_ns)
-        last_idx = np.argmax(ent_event_dt_ns)
+        first_idx = int(np.argmin(ent_event_dt_ns))
+        max_dt = np.max(ent_event_dt_ns)
+        # Если в день максимальной даты было несколько этапов, берём этап с наибольшим рангом
+        last_candidates = np.where(ent_event_dt_ns == max_dt)[0]
+        last_idx = int(last_candidates[np.argmax(ent_stage_rank[last_candidates])])
 
         app_span_rows.append({
             "entity": ent,
@@ -273,8 +244,8 @@ def funnel_tat(
             "min_rank": int(np.min(ent_stage_rank)),
             "max_rank": int(np.max(ent_stage_rank)),
             "last_stage": str(ent_stage_norm[last_idx]),
-            "product_code": str(ent_product[first_idx]) if has_product else "",
-            "channel": str(ent_channel[first_idx]) if has_channel else "",
+            "product_code": str(ent_product[first_idx]) if has_product and pd.notna(ent_product[first_idx]) else "",
+            "channel": str(ent_channel[first_idx]) if has_channel and pd.notna(ent_channel[first_idx]) else "",
         })
 
     app_span_n = len(app_span_rows)
@@ -287,47 +258,39 @@ def funnel_tat(
     app_channel = np.array([r["channel"] for r in app_span_rows], dtype=object)
     app_entity = np.array([r["entity"] for r in app_span_rows], dtype=object)
 
-    # Total TAT
-    total_tat_ns = app_last_dt_ns - app_first_dt_ns
-    total_tat_days = np.where(
-        (app_first_dt_ns != I_NAT) & (app_last_dt_ns != I_NAT) & (total_tat_ns >= 0),
-        total_tat_ns / 86400_000_000_000.0,
-        np.nan,
+    valid_total = (app_first_dt_ns != I_NAT) & (app_last_dt_ns != I_NAT) & (app_last_dt_ns >= app_first_dt_ns)
+    total_tat_days = np.full(app_span_n, np.nan, dtype="float64")
+    total_tat_days[valid_total] = (
+        (app_last_dt_ns[valid_total] - app_first_dt_ns[valid_total]) / 86400_000_000_000.0
     )
 
-    # Sales merge
+    app_manager = np.full(app_span_n, "", dtype=object)
+    app_result = np.full(app_span_n, "", dtype=object)
     has_sales = sales is not None and not sales.empty and entity_col in sales.columns
     if has_sales:
-        sales_cols = [c for c in ("application_id", "manager_id", "result") if c in sales.columns]
-        if entity_col in sales_cols and len(sales_cols) > 1:
+        sales_cols = [c for c in (entity_col, "manager_id", "result") if c in sales.columns]
+        if len(sales_cols) > 1:
             sales_meta = sales[sales_cols].drop_duplicates(subset=[entity_col])
-            sales_dict = {}
-            for _, row in sales_meta.iterrows():
-                sales_dict[str(row[entity_col])] = row
-
-            app_manager = np.full(app_span_n, "", dtype=object)
-            app_result = np.full(app_span_n, "", dtype=object)
+            sales_dict = {str(row[entity_col]): row for _, row in sales_meta.iterrows() if pd.notna(row[entity_col])}
             for i, ent in enumerate(app_entity):
-                if ent in sales_dict:
-                    sr = sales_dict[ent]
-                    if "manager_id" in sr:
-                        app_manager[i] = str(sr["manager_id"])
-                    if "result" in sr:
-                        app_result[i] = str(sr["result"])
-        else:
-            app_manager = np.full(app_span_n, "", dtype=object)
-            app_result = np.full(app_span_n, "", dtype=object)
-    else:
-        app_manager = np.full(app_span_n, "", dtype=object)
-        app_result = np.full(app_span_n, "", dtype=object)
+                key = str(ent)
+                if key in sales_dict:
+                    sr = sales_dict[key]
+                    if "manager_id" in sr and pd.notna(sr["manager_id"]):
+                        app_manager[i] = str(sr["manager_id"]).strip()
+                    if "result" in sr and pd.notna(sr["result"]):
+                        app_result[i] = str(sr["result"]).strip()
 
-    # By segment
     segment_rows: list[dict] = []
-    for seg_col_name, seg_col_data in [("product_code", app_product), ("channel", app_channel), ("manager_id", app_manager)]:
-        unique_segments = np.unique(seg_col_data)
+    for seg_col_name, seg_col_data in [
+        ("product_code", app_product),
+        ("channel", app_channel),
+        ("manager_id", app_manager),
+    ]:
+        unique_segments = [s for s in np.unique(seg_col_data) if str(s).strip() != ""]
         for seg_val in unique_segments:
-            mask = seg_col_data == seg_val
-            completed_mask = mask & (app_max_rank > app_min_rank)
+            s_mask = seg_col_data == seg_val
+            completed_mask = s_mask & (app_max_rank > app_min_rank)
             if not np.any(completed_mask):
                 continue
             vals = total_tat_days[completed_mask]
@@ -338,7 +301,7 @@ def funnel_tat(
             segment_rows.append(
                 {
                     "dimension": seg_col_name,
-                    "segment": str(seg_val) if pd.notna(seg_val) else "не указано",
+                    "segment": str(seg_val),
                     "applications": int(len(vals)),
                     "mean_total_days": round(float(np.mean(vals)), 2),
                     "p50_total_days": round(float(p50), 2),
@@ -347,37 +310,30 @@ def funnel_tat(
             )
     by_segment_df = pd.DataFrame(segment_rows)
 
-    # Aging backlog
     if reference_date is not None:
-        # Parse reference_date to nanoseconds
-        try:
-            ref_dt_ns = int(np.datetime64(str(reference_date), 'ns').astype('int64'))
-        except (ValueError, TypeError):
-            ref_dt_ns = I_NAT
+        parsed_ref = _parse_dates_to_ns(np.array([reference_date], dtype=object))
+        ref_dt_ns = int(parsed_ref[0])
     else:
-        ref_dt_ns = I_NAT
-    terminal_rank = max(STAGE_RANK.values())
+        ref_dt_ns = int(np.max(g_event_dt_ns)) if len(g_event_dt_ns) > 0 else I_NAT
 
+    terminal_rank = max(STAGE_RANK.values())
     in_progress_mask = app_max_rank < terminal_rank
     if has_sales:
-        result_lower = np.array([r.lower() for r in app_result])
+        result_lower = np.array([str(r).lower() for r in app_result])
         completed_mask = np.isin(result_lower, ["отказ", "выдано", "закрыто"])
         in_progress_mask = in_progress_mask & ~completed_mask
 
-    if np.any(in_progress_mask):
+    if ref_dt_ns != I_NAT and np.any(in_progress_mask):
         ip_last_dt_ns = app_last_dt_ns[in_progress_mask]
         ip_last_stage = app_last_stage[in_progress_mask]
-        aging_ns = ref_dt_ns - ip_last_dt_ns
-        aging_days = np.where(
-            (ip_last_dt_ns != I_NAT) & (aging_ns >= 0),
-            aging_ns / 86400_000_000_000.0,
-            np.nan,
-        )
+        valid_aging = (ip_last_dt_ns != I_NAT) & (ref_dt_ns >= ip_last_dt_ns)
+        aging_days = np.full(len(ip_last_dt_ns), np.nan, dtype="float64")
+        aging_days[valid_aging] = (ref_dt_ns - ip_last_dt_ns[valid_aging]) / 86400_000_000_000.0
 
         aging_rows: list[dict] = []
         for stg in np.unique(ip_last_stage):
-            mask = ip_last_stage == stg
-            vals = aging_days[mask]
+            a_mask = ip_last_stage == stg
+            vals = aging_days[a_mask]
             vals = vals[~np.isnan(vals)]
             if len(vals) == 0:
                 continue
@@ -394,7 +350,6 @@ def funnel_tat(
     else:
         aging_df = pd.DataFrame()
 
-    # Kaplan-Meier survival curve
     total_n = app_span_n
     km_rows: list[dict] = []
     survival_prob = 1.0
@@ -431,7 +386,7 @@ def funnel_tat(
         "reference_date": ref_dt_str,
         "assumption": (
             "TAT рассчитан по фактическим датам переходов между этапами STAGE_ORDER. "
-            "Незавершённые заявки выделены в отдельный блок aging_backlog во избежание смещения выжившего."
+            f"Незавершённые заявки выделены в блок aging_backlog на дату среза {ref_dt_str or 'макс. даты'}."
         ),
     }
 
@@ -443,11 +398,7 @@ def seasonality_summary(
     period_length: int | None = None,
     mode: str = "auto",
 ) -> dict:
-    """Выполнить декомпозицию сезонности (аддитивную или мультипликативную) и оценить силу сезонности.
-
-    Автоматически переключается на аддитивную модель, если ряд содержит нулевые или отрицательные
-    значения (например, чистая прибыль или чистый приток), и корректно обрабатывает короткие ряды (< 2 циклов).
-    """
+    """Выполнить декомпозицию сезонности (аддитивную или мультипликативную) и оценить силу сезонности."""
     if series_df is None or series_df.empty:
         return {
             "available": False,
@@ -461,14 +412,20 @@ def seasonality_summary(
 
     df = series_df.copy()
     if period_col not in df.columns:
-        for alt_col in ("period_start", "report_date", "date"):
+        for alt_col in ("period_start", "report_date", "date", "event_date"):
             if alt_col in df.columns:
                 period_col = alt_col
                 break
+
+    if "product_code" in df.columns:
+        df, _ = drop_total_rows(df, group=(period_col,) if period_col in df.columns else ())
+
     if value_col not in df.columns and "interest_income" in df.columns:
         df["_computed_value"] = pd.to_numeric(df["interest_income"], errors="coerce").fillna(0.0)
         if "fee_income" in df.columns:
             df["_computed_value"] += pd.to_numeric(df["fee_income"], errors="coerce").fillna(0.0)
+        if "premium" in df.columns:
+            df["_computed_value"] += pd.to_numeric(df["premium"], errors="coerce").fillna(0.0)
         value_col = "_computed_value"
 
     if period_col not in df.columns or value_col not in df.columns:
@@ -482,11 +439,9 @@ def seasonality_summary(
             "assumption": f"Не найдены колонки периода ({period_col}) или значения ({value_col}).",
         }
 
-    # Parse dates with numpy, avoid pandas datetime
     dt_ns = _parse_dates_to_ns(df[period_col].to_numpy())
     val = pd.to_numeric(df[value_col], errors="coerce").to_numpy()
 
-    # Filter valid
     mask = (dt_ns != I_NAT) & pd.notna(val)
     dt_ns = dt_ns[mask]
     val = val[mask]
@@ -502,12 +457,10 @@ def seasonality_summary(
             "assumption": "После очистки не осталось валидных точек.",
         }
 
-    # Sort by date
     sort_idx = np.argsort(dt_ns)
     dt_ns = dt_ns[sort_idx]
     val = val[sort_idx]
 
-    # Aggregate by date (sum values for same date)
     unique_dates, inverse_idx = np.unique(dt_ns, return_inverse=True)
     agg_val = np.zeros(len(unique_dates), dtype=float)
     np.add.at(agg_val, inverse_idx, val)
@@ -531,28 +484,13 @@ def seasonality_summary(
     else:
         mode_used = mode
 
-    # Оценка тренда скользящим центрированным средним (или линейным сглаживанием на коротких рядах)
-    if n >= period_length:
-        kernel = np.ones(period_length, dtype=float) / period_length
-        trend = np.convolve(y, kernel, mode="same")
-        half = period_length // 2
-        if n > 1:
-            slope_start = (trend[half] - trend[min(half + 1, n - 1)]) if half < n - 1 else 0.0
-            for i in range(half):
-                trend[i] = trend[half] + slope_start * (half - i)
-            last_valid = n - half - 1
-            slope_end = (trend[last_valid] - trend[max(0, last_valid - 1)]) if last_valid > 0 else 0.0
-            for i in range(last_valid + 1, n):
-                trend[i] = trend[last_valid] + slope_end * (i - last_valid)
-    else:
+    if n < 2 * period_length:
         x = np.arange(n, dtype=float)
         if n >= 2:
             slope, intercept = np.polyfit(x, y, 1)
             trend = intercept + slope * x
         else:
             trend = y.copy()
-
-    if n < 2 * period_length:
         residual = y - trend
         comp_df = pd.DataFrame(
             {
@@ -580,7 +518,25 @@ def seasonality_summary(
             ),
         }
 
-    # Cycle position
+    # Симметричное центрированное скользящее среднее (2xP-MA для чётного P)
+    if period_length % 2 == 0:
+        kernel = np.ones(period_length + 1, dtype=float) / period_length
+        kernel[0] = 0.5 / period_length
+        kernel[-1] = 0.5 / period_length
+    else:
+        kernel = np.ones(period_length, dtype=float) / period_length
+    half = len(kernel) // 2
+    valid_conv = np.convolve(y, kernel, mode="valid")
+    trend = np.zeros(n, dtype=float)
+    trend[half : n - half] = valid_conv
+    slope_start = (trend[half] - trend[half + 1]) if (half + 1 < n - half) else 0.0
+    for i in range(half):
+        trend[i] = trend[half] + slope_start * (half - i)
+    last_valid = n - half - 1
+    slope_end = (trend[last_valid] - trend[last_valid - 1]) if (last_valid - 1 >= half) else 0.0
+    for i in range(last_valid + 1, n):
+        trend[i] = trend[last_valid] + slope_end * (i - last_valid)
+
     if period_length == 12:
         cycle_pos = _ns_to_month(dates_ns)
     elif period_length == 4:
@@ -593,8 +549,8 @@ def seasonality_summary(
         detrended = y / safe_trend
         raw_indices: dict[int, float] = {}
         for pos in range(1, period_length + 1):
-            mask = cycle_pos == pos
-            raw_indices[pos] = float(np.median(detrended[mask])) if np.any(mask) else 1.0
+            c_mask = cycle_pos == pos
+            raw_indices[pos] = float(np.median(detrended[c_mask])) if np.any(c_mask) else 1.0
         norm_factor = float(np.mean(list(raw_indices.values()))) or 1.0
         indices = {k: v / norm_factor for k, v in raw_indices.items()}
         seasonal_vec = np.array([indices[p] for p in cycle_pos], dtype=float)
@@ -604,8 +560,8 @@ def seasonality_summary(
         detrended = y - trend
         raw_indices = {}
         for pos in range(1, period_length + 1):
-            mask = cycle_pos == pos
-            raw_indices[pos] = float(np.median(detrended[mask])) if np.any(mask) else 0.0
+            c_mask = cycle_pos == pos
+            raw_indices[pos] = float(np.median(detrended[c_mask])) if np.any(c_mask) else 0.0
         mean_offset = float(np.mean(list(raw_indices.values())))
         indices = {k: v - mean_offset for k, v in raw_indices.items()}
         seasonal_vec = np.array([indices[p] for p in cycle_pos], dtype=float)

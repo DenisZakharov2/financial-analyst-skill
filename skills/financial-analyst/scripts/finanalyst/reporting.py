@@ -71,6 +71,45 @@ COLUMN_TITLES = {
     "пессимистичный": "Пессимистичный",
     "базовый": "Базовый",
     "оптимистичный": "Оптимистичный",
+    # Поэтапный TAT, SLA, бэклог и кривая Каплана-Мейера
+    "transition": "Переход",
+    "count": "Переходов",
+    "mean_days": "Среднее, дн.",
+    "median_p50_days": "Медиана (p50), дн.",
+    "iqr_days": "IQR, дн.",
+    "p75_days": "p75, дн.",
+    "p90_days": "p90, дн.",
+    "p95_days": "p95, дн.",
+    "sla_threshold_days": "Норматив SLA, дн.",
+    "sla_compliance_pct": "В SLA, %",
+    "dimension": "Разрез",
+    "segment": "Сегмент",
+    "applications": "Заявок",
+    "mean_total_days": "Средний TAT, дн.",
+    "p50_total_days": "Медиана TAT, дн.",
+    "p90_total_days": "p90 TAT, дн.",
+    "current_stage": "Текущий этап",
+    "stuck_applications": "Зависших заявок",
+    "median_aging_days": "Медиана ожидания, дн.",
+    "p90_aging_days": "p90 ожидания, дн.",
+    "stage_rank": "Ранг этапа",
+    "at_risk": "Дошли до этапа",
+    "share_from_start_pct": "% от старта",
+    "stage_hazard_pct": "Отток на этапе, %",
+    "km_retention_pct": "Удержание КМ, %",
+    # Сезонность и сравнение срезов
+    "cycle_unit": "Период цикла",
+    "seasonal_index": "Сезонный индекс",
+    "interpretation_pct": "Отклонение, %",
+    "bucket": "Корзина Bridge",
+    "clients_count": "Клиентов",
+    "balance_base": "Базовый остаток, руб.",
+    "balance_target": "Целевой остаток, руб.",
+    "balance_delta": "Изменение, руб.",
+    "contribution_to_growth_pct": "Вклад в прирост, %",
+    "metric": "Показатель",
+    "delta_abs": "Изменение",
+    "delta_pct": "Темп, %",
 }
 
 
@@ -188,37 +227,6 @@ def resolve_font() -> Path:
 # --------------------------------------------------------------------------
 # DOCX
 # --------------------------------------------------------------------------
-
-def report_timestamp(report: ReportData, fmt: str = "%d.%m.%Y %H:%M") -> str:
-    """Единая дата формирования отчёта.
-
-    Берётся из ``meta`` (её же пишет `metrics.json`), поэтому DOCX, PDF, XLSX,
-    PPTX, RTF и HTML показывают одно и то же время, а не шесть разных секунд.
-    """
-    from datetime import datetime
-    generated_at = report.meta.get("generated_at")
-    if generated_at:
-        try:
-            # Parse ISO format: YYYY-MM-DDTHH:MM:SS
-            dt = datetime.fromisoformat(str(generated_at).replace('Z', '+00:00'))
-        except (ValueError, AttributeError):
-            dt = datetime.now()
-    else:
-        dt = datetime.now()
-
-    # Format without strftime to avoid locale issues
-    if fmt == "%d.%m.%Y %H:%M":
-        return f"{dt.day:02d}.{dt.month:02d}.{dt.year:04d} {dt.hour:02d}:{dt.minute:02d}"
-    elif fmt == "%d.%m.%Y":
-        return f"{dt.day:02d}.{dt.month:02d}.{dt.year:04d}"
-    else:
-        # Fallback to strftime for other formats
-        return dt.strftime(fmt)
-
-
-def _chart_title(name: str) -> str:
-    return f"График: {name}"
-
 
 def write_docx(report: ReportData, path: Path) -> Path:
     from docx import Document
@@ -498,6 +506,12 @@ def write_xlsx(report: ReportData, path: Path) -> Path:
         if frame is None or frame.empty:
             continue
         safe_name = re.sub(r"[\\/*?:\[\]]", "", name)[:31] or "Лист"
+        # Avoid duplicate sheet names by appending a counter if needed
+        base_name = safe_name
+        counter = 1
+        while safe_name in workbook.sheetnames:
+            safe_name = f"{base_name[:28]}_{counter}"
+            counter += 1
         ws = workbook.create_sheet(safe_name)
         ws.cell(row=1, column=1, value=name).font = Font(bold=True, size=12)
         start = 3
@@ -523,7 +537,16 @@ def write_xlsx(report: ReportData, path: Path) -> Path:
                 elif isinstance(value, int):
                     cell.number_format = "# ##0"
         for j, column in enumerate(frame.columns, start=1):
-            width = max(10, min(38, len(column_title(column)) + 4))
+            # Calculate width based on both header and data
+            header_width = len(column_title(column)) + 4
+            data_width = 10
+            if len(frame) > 0:
+                try:
+                    max_data_len = max(len(str(frame[column].iloc[k])) for k in range(min(len(frame), 100)))
+                    data_width = max_data_len + 4
+                except Exception:
+                    pass
+            width = max(10, min(38, max(header_width, data_width)))
             ws.column_dimensions[get_column_letter(j)].width = width
         ws.freeze_panes = ws.cell(row=start + 1, column=1)
         ws.auto_filter.ref = f"A{start}:{get_column_letter(len(frame.columns))}{start + len(frame)}"
@@ -639,7 +662,7 @@ def write_pptx(report: ReportData, path: Path) -> Path:
 # --------------------------------------------------------------------------
 
 def _rtf_escape(text: str) -> str:
-    """Экранировать всё вне ASCII по спецификации RTF (\\uN)."""
+    """Экранировать всё вне ASCII по спецификации RTF (\\uN со знаковым int16)."""
     out = []
     for char in str(text):
         code = ord(char)
@@ -650,8 +673,15 @@ def _rtf_escape(text: str) -> str:
                 out.append("\\" + char)
             else:
                 out.append(char)
+        elif code <= 0xFFFF:
+            signed_code = code - 65536 if code > 32767 else code
+            out.append(f"\\u{signed_code}?")
         else:
-            out.append(f"\\u{code}?")
+            # Суррогатная пара UTF-16 для символов за пределами BMP
+            encoded = char.encode("utf-16-le")
+            for i in range(0, len(encoded), 2):
+                unit = int.from_bytes(encoded[i : i + 2], "little", signed=True)
+                out.append(f"\\u{unit}?")
     return "".join(out)
 
 
@@ -727,7 +757,7 @@ ALLOWED_LATIN = {
     "k-means", "z-score", "b2b", "b2c", "p-value",
     # Финансовые и валютные аббревиатуры
     "rub", "usd", "eur", "opex", "capex", "ebitda", "pd", "lgd", "ead",
-    "stage", "plotly", "all", "null", "nan", "b2b", "b2c",
+    "stage", "plotly", "all", "null", "nan", "nrr", "sla", "p50", "p75", "p90", "p95", "km",
 }
 
 
@@ -761,7 +791,7 @@ def lint_text(text: str) -> list[str]:
             issues.append(f"строка {number}: двойной пробел")
         if line.rstrip() != line:
             issues.append(f"строка {number}: пробел в конце строки")
-        for match in re.finditer(r"[A-Za-zА-Яа-яЁё]+", clean):
+        for match in re.finditer(r"[A-Za-z\u0410-\u042f\u0430-\u044f\u0401\u0451]+", clean):
             word = match.group()
             latin = any("LATIN" in unicodedata.name(ch, "") for ch in word)
             cyrillic = any("CYRILLIC" in unicodedata.name(ch, "") for ch in word)
@@ -845,7 +875,7 @@ def write_html(report: ReportData, path: Path) -> Path:
 <title>{html_lib.escape(report.title)}</title>
 <style>
  body {{ margin:0; padding:24px; background:#f8f9fa; color:#1f2937;
-        font-family:"Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }}
+         font-family:"Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }}
  main {{ max-width:1200px; margin:0 auto; }}
  h1 {{ font-size:26px; margin:0 0 4px; }}
  h2 {{ font-size:17px; margin:26px 0 10px; color:#374151; }}
@@ -867,6 +897,37 @@ def write_html(report: ReportData, path: Path) -> Path:
 </main></body></html>"""
     path.write_text(document, encoding="utf-8")
     return path
+
+
+def _chart_title(name: str) -> str:
+    return f"График: {name}"
+
+
+def report_timestamp(report: ReportData, fmt: str = "%d.%m.%Y %H:%M") -> str:
+    """Единая дата формирования отчёта.
+
+    Берётся из ``meta`` (её же пишет `metrics.json`), поэтому DOCX, PDF, XLSX,
+    PPTX, RTF и HTML показывают одно и то же время, а не шесть разных секунд.
+    """
+    from datetime import datetime
+    generated_at = report.meta.get("generated_at")
+    if generated_at:
+        try:
+            # Parse ISO format: YYYY-MM-DDTHH:MM:SS
+            dt = datetime.fromisoformat(str(generated_at).replace('Z', '+00:00'))
+        except (ValueError, AttributeError):
+            dt = datetime.now()
+    else:
+        dt = datetime.now()
+
+    # Format without strftime to avoid locale issues
+    if fmt == "%d.%m.%Y %H:%M":
+        return f"{dt.day:02d}.{dt.month:02d}.{dt.year:04d} {dt.hour:02d}:{dt.minute:02d}"
+    elif fmt == "%d.%m.%Y":
+        return f"{dt.day:02d}.{dt.month:02d}.{dt.year:04d}"
+    else:
+        # Fallback to strftime for other formats
+        return dt.strftime(fmt)
 
 
 WRITERS = {

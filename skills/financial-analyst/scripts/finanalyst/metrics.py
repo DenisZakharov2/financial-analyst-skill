@@ -60,33 +60,28 @@ def _new_clients(clients: pd.DataFrame | None, finance: pd.DataFrame,
     if clients is None or "client_id" not in clients.columns or "period" not in finance.columns:
         return None
     date_column = next((column for column in ("registration_date", "signup_date", "first_product_date")
-                        if column in clients.columns), None)
+                       if column in clients.columns), None)
     if date_column is None:
         return None
 
-    # Parse registration dates to YYYY-MM-DD strings to avoid datetime64 segfault
-    reg_dates = []
+    from .core import _period_to_ym
+
+    reg_yms: list[str] = []
     for val in clients[date_column]:
         if pd.isna(val):
-            reg_dates.append("")
+            reg_yms.append("")
             continue
         s = str(val).strip()
-        # Try to extract YYYY-MM-DD from various formats
-        if len(s) >= 10 and s[4] == "-" and s[7] == "-":
-            reg_dates.append(s[:10])
-        elif len(s) >= 10 and s[2] == "." and s[5] == ".":
-            # DD.MM.YYYY
-            reg_dates.append(f"{s[6:10]}-{s[3:5]}-{s[0:2]}")
-        elif len(s) >= 10 and s[2] == "/" and s[5] == "/":
-            # DD/MM/YYYY
-            reg_dates.append(f"{s[6:10]}-{s[3:5]}-{s[0:2]}")
+        if len(s) >= 7 and s[4] == "-" and s[:4].isdigit() and s[5:7].isdigit():
+            reg_yms.append(s[:7])
+        elif len(s) >= 10 and s[2] in (".", "/") and s[5] in (".", "/"):
+            reg_yms.append(f"{s[6:10]}-{s[3:5]}")
         else:
-            reg_dates.append("")
+            reg_yms.append(_period_to_ym(parse_period(val)))
 
-    if not any(reg_dates):
+    if not any(reg_yms):
         return None
 
-    # Parse finance periods to get window boundaries
     parsed_periods = []
     for value in finance["period"]:
         start, kind = parse_period(value)
@@ -94,10 +89,6 @@ def _new_clients(clients: pd.DataFrame | None, finance: pd.DataFrame,
             parsed_periods.append((start, kind))
     if not parsed_periods:
         return None
-
-    # Find min start and max end as YYYY-MM-DD strings
-    # Use _period_to_ym for start, and calculate end manually
-    from .core import _period_to_ym
 
     def period_to_end_ym(start_ts, kind):
         """Calculate end of period as YYYY-MM string (first day of next period)."""
@@ -107,36 +98,26 @@ def _new_clients(clients: pd.DataFrame | None, finance: pd.DataFrame,
         except (AttributeError, ValueError):
             return ""
         months = PERIOD_MONTHS.get(kind, 1)
-        if months == 1:  # D or M
-            month += 1
-            if month > 12:
-                month = 1
-                year += 1
-        elif months == 3:  # Q
-            month += 3
-            if month > 12:
-                month -= 12
-                year += 1
-        elif months == 12:  # Y
-            year += 1
-            month = 1
+        month += months
+        year += (month - 1) // 12
+        month = ((month - 1) % 12) + 1
         return f"{year:04d}-{month:02d}"
 
     begin_ym = min(_period_to_ym((s, k)) for s, k in parsed_periods)
     end_ym = max(period_to_end_ym(s, k) for s, k in parsed_periods)
 
-    # Compare registration dates (YYYY-MM-DD) with window boundaries (YYYY-MM)
-    # Registration date is in window if begin_ym <= reg_ym < end_ym
+    portfolio_cids: set | None = None
+    if portfolio is not None and "client_id" in portfolio.columns:
+        portfolio_cids = set(portfolio["client_id"].dropna())
+
     count = 0
-    for i, reg_date in enumerate(reg_dates):
-        if not reg_date:
+    client_ids = clients["client_id"].tolist()
+    for cid, reg_ym in zip(client_ids, reg_yms):
+        if not reg_ym:
             continue
-        reg_ym = reg_date[:7]  # YYYY-MM
         if begin_ym <= reg_ym < end_ym:
-            # Check portfolio filter
-            if portfolio is not None and "client_id" in portfolio.columns:
-                cid = clients.iloc[i]["client_id"]
-                if pd.notna(cid) and cid in set(portfolio["client_id"].dropna()):
+            if portfolio_cids is not None:
+                if pd.notna(cid) and cid in portfolio_cids:
                     count += 1
             else:
                 count += 1
@@ -310,17 +291,17 @@ def finance_summary(finance: pd.DataFrame, portfolio: pd.DataFrame | None = None
         raise MetricError("Таблица finance пуста")
 
     df = finance.copy()
+    raw_periods = df["period"].copy() if "period" in df.columns else None
     if "period" in df.columns:
-        # «2024-01», «01.2024» и «январь 2024» — один и тот же период.
-        # Avoid .map() which triggers segfault in pandas 2.2.3/numpy 2.1.3
         df["period"] = [canonical_period(v) for v in df["period"]]
     for column in ("interest_income", "fee_income", "premium", "funding_cost",
                    "reserve_expense", "opex", "tax", "marketing_cost"):
         if column in df.columns:
             df[column] = pd.to_numeric(df[column], errors="coerce")
 
-    # Итоговую строку product_code=ALL не суммируем с детализацией (словарь данных, §7).
     df, excluded = drop_total_rows(df, group=("period",))
+    if raw_periods is not None:
+        raw_periods = raw_periods.loc[df.index]
 
     def col(name: str) -> pd.Series:
         return df[name].fillna(0.0) if name in df.columns else pd.Series(0.0, index=df.index)
@@ -335,8 +316,8 @@ def finance_summary(finance: pd.DataFrame, portfolio: pd.DataFrame | None = None
     grain = [c for c in ("period", "product_code") if c in df.columns]
     if grain:
         rows = (df.groupby(grain, dropna=False)[["revenue", "direct_costs", "gross_margin",
-                                                 "contribution", "opex"]].sum()
-                  .reset_index())
+                                               "contribution", "opex"]].sum()
+                .reset_index())
     else:
         rows = df[["revenue", "direct_costs", "gross_margin", "contribution", "opex"]].sum().to_frame().T
     rows["margin_pct"] = np.where(rows["revenue"] > 0,
@@ -357,13 +338,9 @@ def finance_summary(finance: pd.DataFrame, portfolio: pd.DataFrame | None = None
     }
 
     if portfolio is not None and "balance" in portfolio.columns:
-        # Итоговую строку product_code=ALL не суммируем с детализацией.
         clean_port, _ = drop_total_rows(portfolio, group=())
-        # Исключаем закрытые счета
         if "status" in clean_port.columns:
             clean_port = clean_port[clean_port["status"].astype(str).str.strip().str.lower() != "закрыт"]
-        # В знаменатель NIM попадают только работающие (кредитные) активы:
-        # депозиты и страхование — пассивы, не кредитные остатки.
         work_port = clean_port
         if products is not None and "product_code" in clean_port.columns and "product_type" in products.columns:
             ref = products[["product_code", "product_type"]].drop_duplicates("product_code")
@@ -373,12 +350,10 @@ def finance_summary(finance: pd.DataFrame, portfolio: pd.DataFrame | None = None
             work_port = work_port[work_port["product_type"].isin(credit_types) |
                                   work_port["product_type"].isna()]
         avg_assets = float(pd.to_numeric(work_port["balance"], errors="coerce").sum())
-        months = max(_months_in_periods(df["period"]), 1) if "period" in df.columns else 1
+        months = max(_months_in_periods(raw_periods), 1) if raw_periods is not None else 1
         if avg_assets and months:
             interest = float(col("interest_income").sum())
             funding = float(col("funding_cost").sum())
-            # NIM — годовая ставка: поток за месяцы выгрузки приводим к месяцу,
-            # затем к году, иначе 6 месяцев выручки делятся на остаток одного дня.
             totals["nim_pct"] = round((interest - funding) / months / avg_assets * 100 * 12, 2)
             totals["nim_months"] = months
     return {"rows": rows, "totals": totals}
@@ -420,25 +395,19 @@ def unit_economics(
         active_clients = None
         client_source = "нет данных"
 
-    # ARPU — за месяц, а не за весь период: иначе LTV завышается в разы.
     months = max(_months_in_periods(finance["period"]), 1) if "period" in finance.columns else 1
-
     arpu = revenue / active_clients / months if active_clients else None
     marketing = fin.get("marketing_cost")
-    portfolio_base = portfolio is not None and "client_id" in portfolio.columns
-    acquired = _new_clients(clients, finance, portfolio if portfolio_base else None)
-    # Знаменатель CAC — та же база, что у ARPU: клиент со счётом. Ноль новых
-    # клиентов не подменяется активными: это разные метрики.
+    portfolio_base = work_portfolio is not None and "client_id" in work_portfolio.columns
+    acquired = _new_clients(clients, finance, work_portfolio if portfolio_base else None)
     cac_base = acquired if acquired is not None else active_clients
-    cac = marketing / cac_base if marketing and cac_base else None
+    cac = marketing / cac_base if (marketing is not None and marketing > 0 and cac_base) else None
 
     lifetime = float(lifetime_months)
     ltv_gross = (arpu * margin_ratio * lifetime) if arpu else None
     ltv_net = (ltv_gross - cac) if (ltv_gross is not None and cac is not None) else None
     ratio = (ltv_gross / cac) if (ltv_gross is not None and cac and ltv_gross > 0 and cac > 0) else None
     monthly_margin = (arpu * margin_ratio) if arpu else None
-    # Отрицательная или нулевая валовая маржа означает убыток на каждого клиента:
-    # привлечение не окупается, срок окупаемости и LTV/CAC не определяются.
     payback = (cac / monthly_margin) if (cac and monthly_margin and monthly_margin > 0) else None
 
     assumptions = [
@@ -458,9 +427,14 @@ def unit_economics(
                 "это занижает CAC, если база растёт."
             )
     else:
-        if not marketing:
+        if marketing is None:
             assumptions.append(
                 "Расходы на привлечение не найдены (нет колонки marketing_cost в finance): "
+                "CAC, LTV/CAC и окупаемость не рассчитываются."
+            )
+        elif marketing <= 0:
+            assumptions.append(
+                "Расходы на привлечение в finance равны нулю: "
                 "CAC, LTV/CAC и окупаемость не рассчитываются."
             )
         elif acquired == 0:
@@ -480,6 +454,7 @@ def unit_economics(
         "active_clients": active_clients,
         "new_clients": acquired,
         "cac_base": cac_base,
+        "client_source": client_source,
         "arpu": arpu,
         "margin_pct": margin_pct,
         "marketing_cost": marketing,

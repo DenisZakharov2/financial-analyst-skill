@@ -115,9 +115,9 @@ def _period_to_ym(period_tuple: tuple[pd.Timestamp | pd.NaT, str]) -> str:
 def parse_period(value) -> tuple[pd.Timestamp | pd.NaT, str]:
     """Разобрать период в дату начала и тип (D/M/Q/Y).
 
-    Поддерживаются: 2026-01, 2026-01-15, 01.2026, 1к02, 1кв02, 2020 год,
-    январь 2020, даты Excel и pandas. Невозможная дата (``2024-13``,
-    ``2024-02-30``) даёт ``NaT`` и пустой тип: дальше её ловит контроль качества.
+    Поддерживаются: 2026-01, 2026-01-15, 15.01.2026, 01.2026, 1к02, 1кв02,
+    2020 год, январь 2020, даты Excel и pandas. Невозможная дата (`2024-13`,
+    `2024-02-30`) даёт `NaT` и пустой тип: дальше её ловит контроль качества.
     """
     if value is None or (isinstance(value, float) and np.isnan(value)):
         return pd.NaT, ""
@@ -127,21 +127,28 @@ def parse_period(value) -> tuple[pd.Timestamp | pd.NaT, str]:
         return ts.normalize(), "D" if ts.day != 1 else "M"
 
     if hasattr(value, "year") and hasattr(value, "month") and not isinstance(value, str):
-        return _typed(_timestamp(value.year, value.month, 1), "M")
+        day = getattr(value, "day", 1)
+        kind = "D" if day != 1 else "M"
+        return _typed(_timestamp(value.year, value.month, day), kind)
 
     text = str(value).strip().lower().replace("ё", "е")
     if not text:
         return pd.NaT, ""
 
-    match = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", text)
+    # Отсекаем штамп времени ISO/SQL (YYYY-MM-DD HH:MM:SS / YYYY-MM-DDTHH:MM:SS)
+    match = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})(?:[t\s]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:z|[+-]\d{2}:?\d{2})?)?", text)
     if match:
         return _typed(_timestamp(int(match[1]), int(match[2]), int(match[3])), "D")
+
+    match = re.fullmatch(r"(\d{2})[\./](\d{2})[\./](\d{4})", text)
+    if match:
+        return _typed(_timestamp(int(match[3]), int(match[2]), int(match[1])), "D")
 
     match = re.fullmatch(r"(\d{4})-(\d{2})", text)
     if match:
         return _typed(_timestamp(int(match[1]), int(match[2]), 1), "M")
 
-    match = re.fullmatch(r"(\d{1,2})[./](\d{4})", text)
+    match = re.fullmatch(r"(\d{1,2})[\./](\d{4})", text)
     if match:
         return _typed(_timestamp(int(match[2]), int(match[1]), 1), "M")
 
@@ -170,8 +177,6 @@ def parse_period(value) -> tuple[pd.Timestamp | pd.NaT, str]:
         if month:
             return _typed(_timestamp(year, month, 1), "M")
 
-    # Отключаем pd.to_datetime фоллбэк — он вызывает segfault в pandas 2.2.3/numpy 2.1.3
-    # на datetime64[ns] C-extensions. Если формат не распознан, возвращаем NaT.
     return pd.NaT, ""
 
 
@@ -378,9 +383,6 @@ def validate_inputs(tables: dict[str, pd.DataFrame]) -> QualityReport:
         if len(dpd):
             missing = int(dpd.isna().sum())
             if missing:
-                # Пропуск — не отрицательная просрочка: это warn, а не fail.
-                # В расчёте (portfolio_summary) такой dpd считается нулевым,
-                # и предупреждение говорит об этом прямо.
                 report.add("portfolio_dpd_missing", False,
                            f"Пропусков dpd: {missing}; в расчёте считаются нулевой просрочкой.",
                            warn_only=True)
@@ -390,14 +392,12 @@ def validate_inputs(tables: dict[str, pd.DataFrame]) -> QualityReport:
             coverage = portfolio["client_id"].isin(clients["client_id"]).mean()
             report.add("portfolio_fk_clients", coverage >= 0.99,
                        f"Покрытие client_id: {coverage:.1%}", warn_only=True)
-        if products is not None and "product_code" in portfolio.columns:
+        if products is not None and "product_code" in portfolio.columns and "product_code" in products.columns:
             coverage = portfolio["product_code"].isin(products["product_code"]).mean()
             report.add("portfolio_fk_products", coverage >= 0.99,
                        f"Покрытие product_code: {coverage:.1%}", warn_only=True)
         if {"dpd", "par_bucket"} <= set(portfolio.columns):
             dpd = _numeric(portfolio, "dpd")
-            # Сравниваем только строки с известным dpd: у пропуска бакета нет,
-            # и он уже отдельно отмечен проверкой portfolio_dpd_missing.
             known = dpd.notna()
             bucket = portfolio.loc[known, "par_bucket"].astype(str).str.strip()
             expected = pd.cut(dpd[known], [0, 30, 60, 90, float("inf")],
@@ -462,8 +462,12 @@ def validate_inputs(tables: dict[str, pd.DataFrame]) -> QualityReport:
         # Проверить, не записана ли в tax ставка вместо суммы (все значения в (0, 1] при выручке > 1000)
         if "tax" in finance.columns:
             tax_vals = pd.to_numeric(finance["tax"], errors="coerce").dropna()
-            revenue_vals = pd.to_numeric(finance.get("interest_income", 0), errors="coerce").fillna(0) + \
-                           pd.to_numeric(finance.get("fee_income", 0), errors="coerce").fillna(0)
+            idx = finance.index
+            revenue_vals = (
+                pd.to_numeric(finance.get("interest_income", pd.Series(0.0, index=idx)), errors="coerce").fillna(0)
+                + pd.to_numeric(finance.get("fee_income", pd.Series(0.0, index=idx)), errors="coerce").fillna(0)
+                + pd.to_numeric(finance.get("premium", pd.Series(0.0, index=idx)), errors="coerce").fillna(0)
+            )
             total_revenue = float(revenue_vals.sum())
             if len(tax_vals) > 0 and (tax_vals > 0).all() and (tax_vals <= 1).all() and total_revenue > 1000:
                 report.warnings.append(

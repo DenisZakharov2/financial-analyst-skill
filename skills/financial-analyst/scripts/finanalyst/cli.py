@@ -227,7 +227,7 @@ def flat_values(section: str, values: dict) -> list[dict]:
 def _series(survey: pd.DataFrame, indicator: str, industry: str) -> pd.DataFrame:
     subset = survey[(survey["indicator"] == indicator) & (survey["industry"] == industry)]
     return (subset.groupby("period_start", as_index=False)["value"].mean()
-                  .sort_values("period_start"))
+              .sort_values("period_start"))
 
 
 def _pick_industry(survey: pd.DataFrame, indicator: str) -> str:
@@ -268,7 +268,7 @@ def _correlations(survey: pd.DataFrame, industry: str, max_indicators: int = 8,
         return {"pairs": pd.DataFrame(), "matrix": pd.DataFrame(), "tested": 0}
     frame = pd.DataFrame(pairs)
     frame = (frame.reindex(frame["pearson"].abs().sort_values(ascending=False).index)
-                  .head(top_n).reset_index(drop=True))
+              .head(top_n).reset_index(drop=True))
     matrix = wide[names].corr(method="pearson").round(3)
     return {"pairs": frame, "matrix": matrix, "tested": len(pairs)}
 
@@ -416,9 +416,8 @@ def run(args: argparse.Namespace) -> int:
                 charts["Портфель по типам продуктов"] = chart
         except RecursionError:
             pass
-        except Exception:
-            pass
-
+        except Exception as e:
+            warnings.append(f"Ошибка построения графика портфеля: {e}")
 
     # --- Воронка ----------------------------------------------------------
     funnel_source = tables.get("funnel_events")
@@ -449,8 +448,8 @@ def run(args: argparse.Namespace) -> int:
                 charts["Воронка продаж"] = chart
         except RecursionError:
             pass
-        except Exception:
-            pass
+        except Exception as e:
+            warnings.append(f"Ошибка построения графика воронки: {e}")
 
         # --- Поэтапный TAT и SLA ---
         sales_for_tat = tables.get("sales") if funnel_table_name == "funnel_events" else None
@@ -479,25 +478,35 @@ def run(args: argparse.Namespace) -> int:
                 sections.append(("Воронка: удержание Каплана-Мейера", tat_result["survival_curve"], ""))
 
         # --- Сезонность воронки (если есть даты и количества) ---
-        season_result = seasonality_summary(funnel_source, value_col=funnel_column, period_col="event_date")
-        if season_result.get("available"):
-            sections.append(("Воронка: сезонные индексы", season_result["seasonal_indices"],
-                             season_result["assumption"]))
-            metrics_payload["sections"]["funnel_seasonality"] = {
-                "seasonal_indices": records(season_result["seasonal_indices"]),
-                "components": records(season_result["components"]),
-                "strength_seasonal": season_result["strength_seasonal"],
-                "strength_trend": season_result["strength_trend"],
-                "mode_used": season_result["mode_used"],
-                "assumption": season_result["assumption"],
-            }
+        date_col = next((c for c in ("event_date", "stage_date", "application_date")
+                         if c in funnel_source.columns), None)
+        if date_col is not None:
+            funnel_ts = funnel_source[[date_col]].copy()
+            # Приводим даты событий к началу месяца (YYYY-MM-01) и считаем поток событий
+            funnel_ts["period"] = [
+                f"{str(v).strip()[:7]}-01" if pd.notna(v) and len(str(v).strip()) >= 7 else ""
+                for v in funnel_ts[date_col]
+            ]
+            funnel_ts["events_count"] = 1.0
+            season_result = seasonality_summary(funnel_ts, value_col="events_count", period_col="period")
+            if season_result.get("available"):
+                sections.append(("Воронка: сезонные индексы", season_result["seasonal_indices"],
+                                 season_result["assumption"]))
+                metrics_payload["sections"]["funnel_seasonality"] = {
+                    "seasonal_indices": records(season_result["seasonal_indices"]),
+                    "components": records(season_result["components"]),
+                    "strength_seasonal": season_result["strength_seasonal"],
+                    "strength_trend": season_result["strength_trend"],
+                    "mode_used": season_result["mode_used"],
+                    "assumption": season_result["assumption"],
+                }
 
     # --- Финансы и юнит-экономика ----------------------------------------
     finance = tables.get("finance")
     if finance is not None and not finance.empty:
         fin = finance_summary(finance, portfolio, products)
         sections.append(("Финансовые показатели", fin["rows"], "Выручка = проценты + комиссии + премии; "
-                                                            "прямые расходы = фондирование + резервы."))
+                                                        "прямые расходы = фондирование + резервы."))
         totals = fin["totals"]
         metrics_payload["sections"]["finance"] = {"totals": totals, "rows": records(fin["rows"])}
         headline.append(headline_row("Выручка", totals["revenue"] / 1e6, "млн руб.", "finance",
@@ -525,6 +534,24 @@ def run(args: argparse.Namespace) -> int:
             client_src = unit.get("client_source", "нет данных")
             ltv_source = f"finance, {client_src.split('.')[0]}" if "." in client_src else "finance, portfolio"
             headline.append(headline_row("LTV / CAC", unit["ltv_cac"], "x", ltv_source))
+
+        # --- Сезонность финансов ---
+        if "period" in fin["rows"].columns:
+            fin_periods = fin["rows"][["period", "revenue"]].copy()
+            fin_periods = fin_periods.dropna(subset=["period"])
+            if not fin_periods.empty:
+                season_result = seasonality_summary(fin_periods, value_col="revenue", period_col="period")
+                if season_result.get("available"):
+                    sections.append(("Финансы: сезонные индексы", season_result["seasonal_indices"],
+                                     season_result["assumption"]))
+                    metrics_payload["sections"]["finance_seasonality"] = {
+                        "seasonal_indices": records(season_result["seasonal_indices"]),
+                        "components": records(season_result["components"]),
+                        "strength_seasonal": season_result["strength_seasonal"],
+                        "strength_trend": season_result["strength_trend"],
+                        "mode_used": season_result["mode_used"],
+                        "assumption": season_result["assumption"],
+                    }
 
     # --- Макро ------------------------------------------------------------
     indicator = None
@@ -572,8 +599,8 @@ def run(args: argparse.Namespace) -> int:
                 charts["Динамика по отрасли"] = chart
         except RecursionError:
             pass
-        except Exception:
-            pass
+        except Exception as e:
+            warnings.append(f"Ошибка построения графика макро-динамики: {e}")
         if not anomalies.empty:
             try:
                 chart = chart_anomalies(anomalies, charts_dir / "anomalies.png", label=industry)
@@ -581,8 +608,8 @@ def run(args: argparse.Namespace) -> int:
                     charts["Аномалии по отрасли"] = chart
             except RecursionError:
                 pass
-            except Exception:
-                pass
+            except Exception as e:
+                warnings.append(f"Ошибка построения графика аномалий: {e}")
 
         forecast = forecast_trend(series, horizon=args.forecast_h, band=args.band)
         metrics_payload["sections"]["forecast"] = forecast
@@ -602,8 +629,8 @@ def run(args: argparse.Namespace) -> int:
                     charts["Прогноз по сценариям"] = chart
             except RecursionError:
                 pass
-            except Exception:
-                pass
+            except Exception as e:
+                warnings.append(f"Ошибка построения графика прогноза: {e}")
 
         # Корреляции показателей внутри отрасли: перестановочный p-value не даёт
         # принять случайную связь за вывод, число проверенных пар фиксируется.
@@ -628,8 +655,8 @@ def run(args: argparse.Namespace) -> int:
                     charts["Корреляционная матрица"] = chart
             except RecursionError:
                 pass
-            except Exception:
-                pass
+            except Exception as e:
+                warnings.append(f"Ошибка построения графика корреляций: {e}")
 
         if "html" in formats:
             build_dashboard(survey, indicator, out_dir / "dashboard.html",
@@ -673,8 +700,8 @@ def run(args: argparse.Namespace) -> int:
                 charts[f"{title}: динамика"] = chart
         except RecursionError:
             pass
-        except Exception:
-            pass
+        except Exception as e:
+            warnings.append(f"Ошибка построения графика {title}: {e}")
         headline.append(headline_row(f"{title} (последнее)", totals[value_col].iloc[-1],
                                      "млн руб.", key))
         metrics_payload["sections"][key] = {
@@ -683,6 +710,7 @@ def run(args: argparse.Namespace) -> int:
 
     # --- Сравнение двух выгрузок (--compare-dirs) ---
     if getattr(args, "compare_dirs", None):
+        import secrets
         base_dir = Path(args.compare_dirs[0])
         target_dir = Path(args.compare_dirs[1])
         label_base, label_target = args.labels
@@ -690,6 +718,10 @@ def run(args: argparse.Namespace) -> int:
         tables_target = load_tables(target_dir)
         tables_base, _ = client_csv.normalize(tables_base)
         tables_target, _ = client_csv.normalize(tables_target)
+        if pii_mode != "off":
+            shared_secret = secrets.token_hex(32)
+            tables_base, _ = sanitize_tables(tables_base, mode=pii_mode, secret_key=shared_secret)
+            tables_target, _ = sanitize_tables(tables_target, mode=pii_mode, secret_key=shared_secret)
         comparison = compare_snapshots(tables_base, tables_target, label_base, label_target)
         if comparison.get("available"):
             sections.append((f"Сравнение срезов: {label_base} → {label_target}: схема",
@@ -719,7 +751,7 @@ def run(args: argparse.Namespace) -> int:
                 "schema": {k: records(v) if hasattr(v, "to_dict") else v
                            for k, v in comparison["schema"].items()},
                 "portfolio_bridge": {k: records(v) if hasattr(v, "to_dict") else v
-                                     for k, v in bridge.items()},
+                                      for k, v in bridge.items()},
                 "finance_comparison": records(comparison["finance_comparison"]),
                 "assumption": comparison["assumption"],
             }
@@ -757,7 +789,10 @@ def run(args: argparse.Namespace) -> int:
     if "html" in formats:
         dashboard_path = out_dir / "dashboard.html"
         html_path = out_dir / "report.html"
-        if dashboard_path.exists():
+        has_client_sections = any(
+            k in metrics_payload["sections"] for k in ("portfolio", "funnel", "finance", "comparison")
+        )
+        if dashboard_path.exists() and not has_client_sections:
             dashboard_path.replace(html_path)
         else:
             write_html(report, html_path)

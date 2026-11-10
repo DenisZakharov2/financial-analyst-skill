@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-REQUIRED_KEYS = ("name", "description", "version", "author", "license", "platforms")
+REQUIRED_KEYS = ("name", "description", "version", "author", "license", "platforms", "allowed-tools")
 
 
 def read_frontmatter(text: str) -> dict:
@@ -13,7 +13,7 @@ def read_frontmatter(text: str) -> dict:
     block = text[3:end]
     result = {}
     for line in block.splitlines():
-        match = re.match(r"^([a-z_]+):\s*(.+)$", line)
+        match = re.match(r"^([a-z0-9_-]+):\s*(.+)$", line)
         if match:
             result[match[1]] = match[2].strip().strip('"')
     return result
