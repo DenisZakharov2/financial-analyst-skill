@@ -34,17 +34,50 @@ def _find_header_row(raw: pd.DataFrame) -> int | None:
 
 
 def _dedupe(headers: list[str]) -> list[str]:
+    """Уникализировать заголовки столбцов.
+
+    Если в исходнике уже есть «Итого_1», а «Итого» повторяется, простое
+    добавление суффикса дало бы две колонки с одинаковым именем.
+    """
     seen: dict[str, int] = {}
-    result = []
+    used: set[str] = set()
+    result: list[str] = []
     for header in headers:
         base = header or "без_имени"
-        if base in seen:
-            seen[base] += 1
-            result.append(f"{base}_{seen[base]}")
-        else:
+        if base not in used:
             seen[base] = 0
+            used.add(base)
             result.append(base)
+            continue
+        index = seen.get(base, 0) + 1
+        candidate = f"{base}_{index}"
+        while candidate in used:
+            index += 1
+            candidate = f"{base}_{index}"
+        seen[base] = index
+        used.add(candidate)
+        result.append(candidate)
     return result
+
+
+def _to_float_series(series: pd.Series) -> pd.Series:
+    """Привести значения к числам.
+
+    В книгах ЦБ РФ дробные числа записаны с десятичной запятой и пробелами
+    («1 234,56»): без нормализации они превращались в NaN и выпадали из
+    выборки вместе со строкой.
+    """
+    if pd.api.types.is_numeric_dtype(series):
+        return pd.to_numeric(series, errors="coerce")
+    cleaned = (
+        series.astype(str)
+        .str.replace("\u00a0", "", regex=False)
+        .str.replace(" ", "", regex=False)
+        .str.replace(",", ".", regex=False)
+        .str.replace("−", "-", regex=False)
+        .str.strip()
+    )
+    return pd.to_numeric(cleaned, errors="coerce")
 
 
 def _parse_sheet(raw: pd.DataFrame, sheet: str, source: str) -> pd.DataFrame:
@@ -65,7 +98,7 @@ def _parse_sheet(raw: pd.DataFrame, sheet: str, source: str) -> pd.DataFrame:
 
     melted = data.melt(id_vars=[period_column], var_name="indicator",
                        value_name="value")
-    melted["value"] = pd.to_numeric(melted["value"], errors="coerce")
+    melted["value"] = _to_float_series(melted["value"])
     melted = melted.dropna(subset=["value", period_column])
     melted = melted.assign(
         period=melted[period_column],
@@ -80,15 +113,17 @@ def _parse_sheet(raw: pd.DataFrame, sheet: str, source: str) -> pd.DataFrame:
 
 def parse_workbook(path: Path) -> pd.DataFrame:
     """Разобрать все листы книги в длинную таблицу macro_survey."""
-    workbook = pd.ExcelFile(path)
     frames = []
-    for sheet in workbook.sheet_names:
-        if any(marker in sheet.lower() for marker in SKIP_SHEET_MARKERS):
-            continue
-        raw = pd.read_excel(path, sheet_name=sheet, header=None)
-        parsed = _parse_sheet(raw, sheet, path.name)
-        if not parsed.empty:
-            frames.append(parsed)
+    # Контекстный менеджер закрывает книгу: без него на Windows остаётся
+    # незакрытый дескриптор, а файл читается заново для каждого листа.
+    with pd.ExcelFile(path) as workbook:
+        for sheet in workbook.sheet_names:
+            if any(marker in sheet.lower() for marker in SKIP_SHEET_MARKERS):
+                continue
+            raw = pd.read_excel(workbook, sheet_name=sheet, header=None)
+            parsed = _parse_sheet(raw, sheet, path.name)
+            if not parsed.empty:
+                frames.append(parsed)
     if not frames:
         return pd.DataFrame(columns=["period", "industry", "indicator", "value", "unit",
                                      "source_file", "source_sheet"])

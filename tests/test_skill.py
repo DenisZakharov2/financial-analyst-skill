@@ -32,9 +32,15 @@ def test_frontmatter_required_fields(skill_text):
 
 
 def test_description_is_short_and_complete(skill_text):
+    """Описание — единственный текст, который видит LLM-роутер, поэтому лимит
+    не должен быть короче, чем нужно для перечисления возможностей скилла."""
     meta = read_frontmatter(skill_text)
-    assert len(meta["description"]) <= 60, len(meta["description"])
+    assert len(meta["description"]) <= 300, len(meta["description"])
+    assert len(meta["description"]) >= 100, len(meta["description"])
     assert meta["description"].endswith(".")
+    # Ключевые сценарии должны быть видны роутеру до активации скилла.
+    for keyword in ("портфель", "воронк", "LTV", "ПДн", "ЦБ"):
+        assert keyword in meta["description"], f"в описании нет слова «{keyword}»"
 
 
 def test_body_is_not_empty(skill_text):
@@ -69,3 +75,30 @@ def test_examples_and_readme_exist():
     assert (root / "README.md").exists()
     assert (root / "LICENSE").exists()
     assert (root / "examples" / "quickstart" / "README.md").exists()
+
+
+def test_check_text_detects_double_space_and_mixed_alphabets(tmp_path, skill_dir):
+    """Регресс-тест: проверка текста скилла действительно выполняется."""
+    import importlib.util
+
+    check_path = skill_dir / "scripts" / "check_skill.py"
+    spec = importlib.util.spec_from_file_location("check_skill_module", check_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    sample = tmp_path / "bad_doc.md"
+    sample.write_text("Текст  с двойным пробелом и Cлово с латиницей.\n", encoding="utf-8")
+    issues = module.check_text(sample)
+    assert any("двойной пробел" in item for item in issues)
+    assert any("смешение алфавитов" in item for item in issues)
+
+
+def test_check_skill_passes_for_the_current_skill(skill_dir):
+    """Проверка самого скилла должна проходить на актуальных файлах."""
+    import importlib.util
+
+    check_path = skill_dir / "scripts" / "check_skill.py"
+    spec = importlib.util.spec_from_file_location("check_skill_module", check_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.main() == 0

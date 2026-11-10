@@ -22,9 +22,67 @@ WORKBOOK_SUFFIXES = {".xls", ".xlsx"}
 
 KNOWN_TABLES = frozenset({
     "clients", "products", "portfolio", "accounts", "sales", "applications",
-    "funnel_events", "transactions", "finance", "macro_deposits", "macro_loans",
-    "macro_profit", "macro_securities", "macro_survey",
+    "funnel_events", "funnel", "transactions", "finance", "macro_deposits",
+    "macro_loans", "macro_profit", "macro_securities", "macro_survey",
 })
+
+# Кодировки CSV в порядке убывания вероятности: выгрузка UTF-8 с BOM, потом
+# cp1251 (типичная выгрузка 1С/АБС), потом utf-8 без BOM.
+CSV_ENCODINGS = ("utf-8-sig", "cp1251", "utf-8")
+CSV_SEPARATORS = (",", ";", "\t", "|")
+
+
+def _detect_separator(path: Path) -> str | None:
+    """Определить разделитель CSV по строке заголовка.
+
+    Если в заголовке нет ни одного разделителя, файл одноколоночный:
+    возвращается ``None``, и файл читается без разделителя. Раньше для таких
+    файлов применялся ``sep=None`` с движком Python, который «находил» в
+    одноколоночном файле вымышленный разделитель и портил шапку
+    (``value`` превращался в ``alue`` плюс колонка ``Unnamed: 0``).
+    """
+    header = ""
+    try:
+        raw = path.read_bytes().split(b"\n", 1)[0]
+    except OSError:
+        return None
+    for encoding in CSV_ENCODINGS:
+        try:
+            header = raw.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    if not header:
+        return None
+    counts = {sep: header.count(sep) for sep in CSV_SEPARATORS}
+    best = max(counts, key=lambda sep: counts[sep])
+    return best if counts[best] > 0 else None
+
+
+def _read_csv_flexible(path: Path) -> pd.DataFrame:
+    """Прочитать CSV с автоопределением кодировки и разделителя.
+
+    Порядок кодировок: ``utf-8-sig`` → ``cp1251`` → ``utf-8``. Файл в cp1251
+    раньше приводил к ``UnicodeDecodeError`` и ронял весь прогон.
+    """
+    separator = _detect_separator(path)
+    last_error: Exception | None = None
+    for encoding in CSV_ENCODINGS:
+        try:
+            if separator:
+                return pd.read_csv(path, sep=separator, encoding=encoding)
+            return pd.read_csv(path, encoding=encoding)
+        except UnicodeDecodeError as exc:
+            last_error = exc
+            continue
+        except pd.errors.EmptyDataError:
+            return pd.DataFrame()
+        except Exception as exc:  # noqa: BLE001 - сообщаем пользователю как есть
+            last_error = exc
+            break
+    if last_error is not None:
+        raise last_error
+    return pd.read_csv(path, encoding=CSV_ENCODINGS[0])
 
 
 def load_tables(data_dir: Path, skip_patterns: tuple[str, ...] = ()) -> dict[str, pd.DataFrame]:
@@ -48,7 +106,7 @@ def load_tables(data_dir: Path, skip_patterns: tuple[str, ...] = ()) -> dict[str
         name = path.stem
         try:
             if path.suffix.lower() == ".csv":
-                tables[name] = pd.read_csv(path, sep=None, engine="python", encoding="utf-8-sig")
+                tables[name] = _read_csv_flexible(path)
             else:
                 tables[name] = pd.read_excel(path, sheet_name=0)
         except Exception as exc:  # noqa: BLE001 - сообщаем пользователю как есть
@@ -71,9 +129,17 @@ class DataLoadError(RuntimeError):
 # --------------------------------------------------------------------------
 
 MONTHS_RU = {
-    "январ": 1, "феврал": 2, "март": 3, "апрел": 4,
+    "январ": 1, "янв": 1,
+    "феврал": 2, "фев": 2,
+    "март": 3, "мар": 3,
+    "апрел": 4, "апр": 4,
     "май": 5, "мая": 5, "мае": 5, "маем": 5,
-    "июн": 6, "июл": 7, "август": 8, "сентябр": 9, "октябр": 10, "ноябр": 11, "декабр": 12,
+    "июн": 6, "июль": 7, "июл": 7,
+    "август": 8, "авг": 8,
+    "сентябр": 9, "сент": 9, "сен": 9,
+    "октябр": 10, "окт": 10,
+    "ноябр": 11, "ноя": 11,
+    "декабр": 12, "дек": 12,
 }
 
 
@@ -138,11 +204,15 @@ def parse_period(value) -> tuple[pd.Timestamp | pd.NaT, str]:
     # Отсекаем штамп времени ISO/SQL (YYYY-MM-DD HH:MM:SS / YYYY-MM-DDTHH:MM:SS)
     match = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})(?:[t\s]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:z|[+-]\d{2}:?\d{2})?)?", text)
     if match:
-        return _typed(_timestamp(int(match[1]), int(match[2]), int(match[3])), "D")
+        day = int(match[3])
+        # 1-е число месяца — это месячный период, а не дневной:
+        # так «2024-05-01» и Timestamp("2024-05-01") трактуются одинаково.
+        return _typed(_timestamp(int(match[1]), int(match[2]), day), "D" if day != 1 else "M")
 
     match = re.fullmatch(r"(\d{2})[\./](\d{2})[\./](\d{4})", text)
     if match:
-        return _typed(_timestamp(int(match[3]), int(match[2]), int(match[1])), "D")
+        day = int(match[1])
+        return _typed(_timestamp(int(match[3]), int(match[2]), day), "D" if day != 1 else "M")
 
     match = re.fullmatch(r"(\d{4})-(\d{2})", text)
     if match:
@@ -180,28 +250,68 @@ def parse_period(value) -> tuple[pd.Timestamp | pd.NaT, str]:
     return pd.NaT, ""
 
 
-def canonical_period(value) -> str:
-    """Привести период к ``YYYY-MM``; неразобранное значение вернуть как есть.
+def period_grain(values) -> str:
+    """Зерно колонки периодов: ``D`` (дни) или ``M`` (месяцы и выше).
 
-    Нужно, чтобы «2024-01», «01.2024» и «январь 2024» не расходились по разным
-    строкам одной и той же таблицы.
+    Если хотя бы одно значение указывает на конкретный день (число не 1),
+    колонка считается дневной. Иначе месячная колонка, заданная датами
+    вида ``2024-05-01``, не была бы принята за дневную детализацию.
     """
-    # Быстрая проверка: если уже в формате YYYY-MM, вернуть как есть
-    if isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}", value):
-        return value
+    for value in values:
+        start, kind = parse_period(value)
+        if pd.isna(start):
+            continue
+        if kind == "D":
+            return "D"
+    return "M"
+
+
+def period_ym(value) -> str:
+    """Месячный бакет периода ``YYYY-MM`` — ключ для агрегации и графиков."""
     start, _ = parse_period(value)
     if pd.isna(start):
+        return ""
+    return _period_to_ym((start, "M"))
+
+
+def canonical_period(value, grain: str | None = None) -> str:
+    """Привести период к каноническому виду.
+
+    При ``grain="D"`` возвращается полная дата ``YYYY-MM-DD``, иначе месяц
+    ``YYYY-MM``. Если зерно не задано, оно определяется по самому значению:
+    конкретный день — ``YYYY-MM-DD``, месяц, квартал и год — ``YYYY-MM``.
+
+    Нужно, чтобы «2024-01», «01.2024» и «январь 2024» не расходились по разным
+    строкам одной и той же таблицы, а дневная детализация не теряла дни.
+    """
+    # Быстрая проверка: если уже в формате YYYY-MM, вернуть как есть
+    if grain is None and isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}", value):
+        return value
+    start, kind = parse_period(value)
+    if pd.isna(start):
         return str(value)
-    return _period_to_ym(parse_period(value))
+    if grain == "D" or (grain is None and kind == "D"):
+        try:
+            return f"{int(start.year):04d}-{int(start.month):02d}-{int(start.day):02d}"
+        except (AttributeError, ValueError):
+            return str(value)
+    return _period_to_ym((start, kind))
 
 
 def normalize_periods(df: pd.DataFrame, column: str = "period") -> pd.DataFrame:
-    """Добавить period_start (строка YYYY-MM) и period_type, отсортировать по дате."""
+    """Добавить period_start (YYYY-MM), period_ym, period_full и period_type.
+
+    ``period_start`` и ``period_ym`` — месячный бакет (для агрегации и графиков),
+    ``period_full`` — период в зерне исходных данных: ``YYYY-MM-DD`` для дневной
+    детализации и ``YYYY-MM`` для месячной. Сортировка идёт по ``period_full``,
+    поэтому внутримесячный порядок не теряется.
+    """
     if column not in df.columns:
         return df.copy()
     result = df.copy()
     # Avoid .map() which triggers segfault in pandas 2.2.3/numpy 2.1.3
     pairs = [parse_period(v) for v in result[column]]
+    grain = period_grain(result[column])
     # Храним period_start как строку YYYY-MM, а не Timestamp,
     # чтобы избежать segfault в pandas 2.2.3 при sort_values/dropna на datetime64
     # Используем pd.NA для невозможных дат, чтобы isna() работала корректно
@@ -209,17 +319,56 @@ def normalize_periods(df: pd.DataFrame, column: str = "period") -> pd.DataFrame:
         _period_to_ym(p) if pd.notna(p[0]) else pd.NA
         for p in pairs
     ]
-    result["period_type"] = [p[1] for p in pairs]
-    result = result.sort_values("period_start", kind="stable").reset_index(drop=True)
+    result["period_ym"] = result["period_start"]
+    result["period_full"] = [
+        canonical_period(value, grain) if pd.notna(pair[0]) else pd.NA
+        for value, pair in zip(result[column], pairs)
+    ]
+    result["period_type"] = [
+        ("D" if grain == "D" else pair[1]) if pd.notna(pair[0]) else ""
+        for pair in pairs
+    ]
+    result = result.sort_values("period_full", kind="stable").reset_index(drop=True)
     return result
 
 
-def period_labels(values: pd.Series, fmt: str = "%Y-%m") -> pd.Series:
-    """Подпись периода для отчёта: ``YYYY-MM`` из даты или из текста.
+_PERIOD_FORMATS = {
+    "%Y-%m": "{y:04d}-{m:02d}",
+    "%Y-%m-%d": "{y:04d}-{m:02d}-{d:02d}",
+    "%d.%m.%Y": "{d:02d}.{m:02d}.{y:04d}",
+    "%Y": "{y:04d}",
+    "%Y-%m-%d %H:%M": "{y:04d}-{m:02d}-{d:02d} {h:02d}:{mi:02d}",
+}
 
-    Колонка ``period_start`` может прийти датой (после ``normalize_periods``)
-    или текстом (готовая длинная таблица). ``.dt`` на тексте падает, поэтому
-    дата приводится через парсинг строк, а неразобранный текст остаётся как есть.
+
+def _format_period(ts: pd.Timestamp, fmt: str) -> str:
+    """Отформатировать дату периода.
+
+    Частые форматы считаются вручную: ``strftime`` в pandas 2.2.3 при numpy 2.x
+    приводил к падению процесса, а не к исключению.
+    """
+    template = _PERIOD_FORMATS.get(fmt)
+    if template is None:
+        try:
+            return ts.strftime(fmt)
+        except (AttributeError, ValueError):
+            return _period_to_ym((ts, "M"))
+    try:
+        return template.format(
+            y=int(ts.year), m=int(ts.month), d=int(ts.day),
+            h=int(ts.hour), mi=int(ts.minute),
+        )
+    except (AttributeError, ValueError):
+        return _period_to_ym((ts, "M"))
+
+
+def period_labels(values: pd.Series, fmt: str = "%Y-%m") -> pd.Series:
+    """Подпись периода для отчёта.
+
+    Формат задаётся ``fmt``: ``%Y-%m`` — месяц (по умолчанию), ``%Y-%m-%d`` —
+    день. Колонка ``period_start`` может прийти датой (после ``normalize_periods``)
+    или текстом (готовая длинная таблица), поэтому дата приводится через парсинг
+    строк, а неразобранный текст остаётся как есть.
     """
     # Avoid pd.to_datetime which triggers segfault in pandas 2.2.3/numpy 2.1.3
     out = []
@@ -227,8 +376,11 @@ def period_labels(values: pd.Series, fmt: str = "%Y-%m") -> pd.Series:
         if pd.isna(v):
             out.append("")
             continue
+        start, _ = parse_period(v)
+        if pd.notna(start):
+            out.append(_format_period(start, fmt))
+            continue
         s = str(v).strip()
-        # Try to extract YYYY-MM
         if len(s) >= 7 and s[4] == "-":
             out.append(s[:7])
         elif len(s) >= 10 and s[2] == "." and s[5] == ".":
@@ -243,7 +395,9 @@ def period_labels(values: pd.Series, fmt: str = "%Y-%m") -> pd.Series:
 
 
 # Итоговые строки: по словарю данных это `product_code = 'ALL'`.
-TOTAL_CODES = frozenset({"ALL"})
+# В выгрузках встречаются и другие обозначения итогов — их тоже нельзя
+# суммировать с детализацией.
+TOTAL_CODES = frozenset({"ALL", "TOTAL", "ИТОГО", "ВСЕГО"})
 
 
 def drop_total_rows(
@@ -331,7 +485,11 @@ REQUIRED_COLUMNS = {
     "finance": ("period", "product_code"),
 }
 
-TABLE_ALIASES = {"portfolio": "accounts", "sales": "applications"}
+TABLE_ALIASES = {
+    "portfolio": "accounts",
+    "sales": "applications",
+    "funnel_events": "funnel",
+}
 
 
 def validate_inputs(tables: dict[str, pd.DataFrame]) -> QualityReport:
@@ -398,11 +556,13 @@ def validate_inputs(tables: dict[str, pd.DataFrame]) -> QualityReport:
                        f"Покрытие product_code: {coverage:.1%}", warn_only=True)
         if {"dpd", "par_bucket"} <= set(portfolio.columns):
             dpd = _numeric(portfolio, "dpd")
-            known = dpd.notna()
-            bucket = portfolio.loc[known, "par_bucket"].astype(str).str.strip()
+            # Отрицательные dpd ловятся отдельной проверкой; в срезе они дают
+            # ложное значение nan в pd.cut, поэтому в сравнении не участвуют.
+            known = dpd.notna() & (dpd >= 0)
+            bucket = portfolio.loc[known, "par_bucket"].astype(str).str.strip().str.lower()
             expected = pd.cut(dpd[known], [0, 30, 60, 90, float("inf")],
                               labels=["current", "30+", "60+", "90+"], right=False)
-            mismatched = int((bucket != expected.astype(str)).sum())
+            mismatched = int((bucket != expected.astype(str).str.lower()).sum())
             report.add("portfolio_dpd_bucket_consistent", mismatched == 0,
                        f"Несогласованных строк dpd/par_bucket: {mismatched}", warn_only=True)
         if "currency" in portfolio.columns:
@@ -441,10 +601,12 @@ def validate_inputs(tables: dict[str, pd.DataFrame]) -> QualityReport:
 
     if finance is not None:
         if {"period", "product_code"} <= set(finance.columns):
-            grain = finance[["period", "product_code"]].copy()
-            # Avoid .map() which triggers segfault in pandas 2.2.3/numpy 2.1.3
-            grain["period"] = [canonical_period(v) for v in grain["period"]]
-            dup = int(grain.duplicated().sum())
+            grain = period_grain(finance["period"])
+            # Зерно берём из исходных данных: дневная детализация (2024-05-01,
+            # 2024-05-02) — это разные строки, а не дубли одного месяца.
+            grain_frame = finance[["period", "product_code"]].copy()
+            grain_frame["period"] = [canonical_period(v, grain) for v in grain_frame["period"]]
+            dup = int(grain_frame.duplicated().sum())
             report.add("finance_grain_unique", dup == 0,
                        f"Дублей period+product_code: {dup}")
         if "product_code" in finance.columns:

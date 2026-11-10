@@ -460,6 +460,9 @@ def run(args: argparse.Namespace) -> int:
                                  tat_result["assumption"]))
                 metrics_payload["sections"]["funnel_tat"] = {
                     "by_transition": records(tat_result["by_transition"]),
+                    "skipped_transitions": records(tat_result["skipped_transitions"]),
+                    "skipped_count": tat_result.get("skipped_count", 0),
+                    "backward_count": tat_result.get("backward_count", 0),
                     "by_segment": records(tat_result["by_segment"]),
                     "aging_backlog": records(tat_result["aging_backlog"]),
                     "survival_curve": records(tat_result["survival_curve"]),
@@ -471,6 +474,13 @@ def run(args: argparse.Namespace) -> int:
                 headline.append(headline_row(
                     f"TAT {last_trans['transition']} (медиана)", last_trans["median_p50_days"], "дней",
                     "funnel_events"
+                ))
+            if not tat_result.get("skipped_transitions", pd.DataFrame()).empty:
+                sections.append((
+                    "Воронка: переходы с пропущенным этапом",
+                    tat_result["skipped_transitions"],
+                    "Эти переходы охватывают несколько этапов сразу, поэтому в SLA и TAT "
+                    "по этапам не входят.",
                 ))
             if not tat_result["aging_backlog"].empty:
                 sections.append(("Воронка: зависший бэклог", tat_result["aging_backlog"], ""))

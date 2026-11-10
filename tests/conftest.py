@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -49,22 +50,19 @@ def date_strings(start: str, periods: int, freq: str = "M") -> list[str]:
 
 
 def date_strings_daily(start: str, periods: int) -> list[str]:
-    """Generate list of YYYY-MM-DD strings for daily frequency."""
+    """Generate list of YYYY-MM-DD strings for daily frequency.
+
+    Календарь точный: 29, 30 и 31 число присутствуют, соседние даты отличаются
+    на один день. Прежний цикл «вычитать 28 дней» обрезал каждый месяц до 28
+    дней, из-за чего между «соседними» датами получалось 4 суток, а тесты TAT
+    и дневных рядов считали неверные интервалы.
+    """
     year, month, day = map(int, start.split("-"))
-    result = []
-    for i in range(periods):
-        # Simple day increment (approximate)
-        d = day + i
-        m = month
-        y = year
-        while d > 28:  # Simplified month boundary
-            d -= 28
-            m += 1
-            if m > 12:
-                m = 1
-                y += 1
-        result.append(f"{y:04d}-{m:02d}-{d:02d}")
-    return result
+    anchor = pd.Timestamp(year=year, month=month, day=day)
+    return [
+        (anchor + pd.Timedelta(days=offset)).strftime("%Y-%m-%d")
+        for offset in range(periods)
+    ]
 
 
 @ pytest.fixture(scope="session")

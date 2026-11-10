@@ -15,6 +15,10 @@ SKILL_DIR = Path(__file__).resolve().parents[1]
 REQUIRED = ("name", "description", "version", "author", "license", "platforms", "allowed-tools")
 LINK_PATTERN = re.compile(r"`((?:references|scripts|templates|assets)/[^`]+)`")
 ABS_PATH_MARKERS = ("/home/", "/Users/", "C:\\")
+# Описание скилла — единственный текст, который видит LLM-роутер до активации.
+# Спецификация Agent Skills допускает до 1024 символов; лимит в 60 символов
+# заставлял скрывать от роутера ключевые возможности скилла.
+MAX_DESCRIPTION_LEN = 300
 
 WORD_RE = re.compile(r"[A-Za-z\u0410-\u042f\u0430-\u044f\u0401\u0451]+")
 INLINE_CODE_RE = re.compile(r"`[^`]+`")
@@ -30,7 +34,7 @@ def read_frontmatter(text: str) -> dict[str, str]:
     for line in text[3:end].splitlines():
         match = re.match(r"^([a-z0-9_-]+):\s*(.+)$", line)
         if match:
-            result[match[1]] = match[2].strip().strip('"')
+            result[match[1]] = match[2].strip().strip("\"'")
     return result
 
 
@@ -76,8 +80,10 @@ def main() -> int:
             errors.append(f"frontmatter: нет поля {key}")
 
     description = meta.get("description", "")
-    if len(description) > 60:
-        errors.append(f"description: {len(description)} символов, максимум 60")
+    if len(description) > MAX_DESCRIPTION_LEN:
+        errors.append(
+            f"description: {len(description)} символов, максимум {MAX_DESCRIPTION_LEN}"
+        )
     if not description.endswith("."):
         errors.append("description: нет точки в конце")
 
@@ -95,19 +101,14 @@ def main() -> int:
             continue
         if not path.is_file() or path.suffix not in {".md", ".py", ".tmpl", ".csv"}:
             continue
-        # Skip references/ folder - it's documentation, not skill code/templates
-        if "references" in path.parts:
-            content = path.read_text(encoding="utf-8", errors="ignore")
-            for marker in ABS_PATH_MARKERS:
-                if marker in content:
-                    errors.append(f"локальный путь в {path.relative_to(SKILL_DIR)}")
-                    break
-            continue
         content = path.read_text(encoding="utf-8", errors="ignore")
         for marker in ABS_PATH_MARKERS:
             if marker in content:
                 errors.append(f"локальный путь в {path.relative_to(SKILL_DIR)}")
                 break
+        # Проверка текста применяется ко всем markdown и шаблонам, включая
+        # references/: опечатки и смешение алфавитов в справочниках видны
+        # пользователю не реже, чем в SKILL.md.
         if path.suffix in {".md", ".tmpl"}:
             errors.extend(check_text(path))
 

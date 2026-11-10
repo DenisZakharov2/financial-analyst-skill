@@ -14,9 +14,9 @@
 | `reached_i` | этап воронки | заявки с максимальным этапом ≥ i | — | нет заявок → `null` | funnel_events.application_id |
 | `from_start_pct` | этап воронки | `reached_i` | `reached_1` | `reached_1 = 0` → `null` | funnel_events |
 | `stage_pct` | этап воронки | `reached_i` | `reached_{i-1}` | предыдущий = 0 → `null` | funnel_events |
-| `tat_median_p50_days` | переход воронки | медиана `event_date_{i+1} - event_date_i` (сут.) | — | < 2 этапов у заявки → не входит в переход | funnel_events |
-| `tat_p90_days` | переход воронки | 90-й перцентиль `event_date_{i+1} - event_date_i` | — | нет завершённых переходов → `null` | funnel_events |
-| `sla_compliance_pct` | переход воронки | переходы с `tat_days ≤ sla_threshold` | все завершённые переходы этапа | переходов = 0 → `null` | funnel_events |
+| `tat_median_p50_days` | переход воронки | медиана `event_date_{i+1} - event_date_i` (сут.) | — | только смежные переходы (Δ ранга этапа = 1); переход с пропущенным этапом — в `skipped_transitions` и в SLA не входит | funnel_events |
+| `tat_p90_days` | переход воронки | 90-й перцентиль `event_date_{i+1} - event_date_i` | — | нет завершённых смежных переходов → `null` | funnel_events |
+| `sla_compliance_pct` | переход воронки | смежные переходы с `tat_days ≤ sla_threshold` | все смежные переходы этапа | переходов = 0 → `null` | funnel_events |
 | `aging_median_days` | этап воронки | медиана `reference_date - last_event_date` | — | нет зависших заявок → 0 | funnel_events, sales |
 | `km_retention_pct` | этап воронки | $\prod_{k < i} (1 - \text{hazard}_k) \times 100$ | — | `at_risk = 0` → `hazard = 0` | funnel_events |
 | `revenue` | период × продукт | проценты + комиссии + премии | — | нет колонки → 0 с пометкой | finance |
@@ -55,6 +55,12 @@
 `nim_pct` — годовая ставка: поток за месяцы выгрузки приводится к месяцу и
 умножается на 12, иначе выручка за 6 месяцев делится на остаток одного дня.
 
+> Строки `pvm_*`, `within_risk_effect_pp`, `structural_mix_effect_pp`, `granger_p_fdr`,
+> `ab_srm_p_value`, `ab_absolute_effect`, `did_att_effect`, `rfm_segment`, `smape_pct`,
+> `mase` описывают **дорожную карту версии 2.1.0**: модулей `drivers`, `experiments`,
+> `segmentation` и `forecast` в пакете пока нет, эти метрики не считаются.
+> Реализованы строки от `accounts` до `mae` (включая `mape_pct`) и Bridge-метрики.
+
 ## Правила
 
 1. **Зерно фиксировано.** Нельзя смешивать строку продукта и строку `ALL`:
@@ -62,7 +68,12 @@
    а число исключённых строк фиксируется в `excluded_total_rows`.
 2. **Знаменатель нулевой → `null` и причина.** Не 0, не `NaN`, не «-» без объяснения.
 3. **Период — календарный месяц.** Квартал приводится к первому месяцу квартала
-   с типом `Q`; смешивать типы в одном ряду нельзя.
+   с типом `Q`; смешивать типы в одном ряду нельзя. В длинных таблицах
+   `normalize_periods` даёт три колонки: `period_ym` (месячный бакет `YYYY-MM`),
+   `period_full` (период в зерне исходных данных, `YYYY-MM-DD` для дневной
+   детализации) и `period_type`. Агрегация P&L идёт по `period_ym`, зерно
+   проверки уникальности — по `period_full`, поэтому дневные строки одного
+   месяца не считаются дублями.
 4. **Валюта.** Метрики в разных валютах не агрегируются. Если в портфеле
    несколько валют, сначала пересчёт по курсу с датой, потом агрегат.
 5. **Округление.** Хранить значение без округления, округлять при выводе:

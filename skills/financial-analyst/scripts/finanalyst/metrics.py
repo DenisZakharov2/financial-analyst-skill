@@ -9,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from .core import canonical_period, drop_total_rows, parse_period
+from .core import drop_total_rows, parse_period, period_ym
 
 STAGE_ORDER = ["лид", "обращение", "заявка", "одобрение", "договор", "активация"]
 STAGE_RANK = {stage: i + 1 for i, stage in enumerate(STAGE_ORDER)}
@@ -293,7 +293,9 @@ def finance_summary(finance: pd.DataFrame, portfolio: pd.DataFrame | None = None
     df = finance.copy()
     raw_periods = df["period"].copy() if "period" in df.columns else None
     if "period" in df.columns:
-        df["period"] = [canonical_period(v) for v in df["period"]]
+        # Отчётный разрез P&L — месячный: дневная детализация сворачивается
+        # в месяц (period_ym), при этом сами даты не теряются в исходной таблице.
+        df["period"] = [period_ym(v) for v in df["period"]]
     for column in ("interest_income", "fee_income", "premium", "funding_cost",
                    "reserve_expense", "opex", "tax", "marketing_cost"):
         if column in df.columns:

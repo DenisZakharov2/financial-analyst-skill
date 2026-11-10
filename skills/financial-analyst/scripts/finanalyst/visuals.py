@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from pathlib import Path
 
 import matplotlib
@@ -63,6 +64,21 @@ def _empty(path: Path) -> None:
         path.unlink()
 
 
+@contextmanager
+def managed_figure(*args, **kwargs):
+    """Создать фигуру matplotlib и гарантированно закрыть её.
+
+    Без `finally` фигура оставалась в менеджере matplotlib, если построение
+    прерывалось исключением: при пакетной генерации это давало утечку памяти
+    и предупреждение «More than 20 figures have been opened».
+    """
+    fig, ax = plt.subplots(*args, **kwargs)
+    try:
+        yield fig, ax
+    finally:
+        plt.close(fig)
+
+
 def chart_portfolio(rows: pd.DataFrame, path: Path) -> Path | None:
     if rows is None or rows.empty or "total_balance" not in rows:
         _empty(path)
@@ -72,19 +88,18 @@ def chart_portfolio(rows: pd.DataFrame, path: Path) -> Path | None:
         _empty(path)
         return None
 
-    fig, ax = plt.subplots(figsize=(9, 4.5))
-    ax.barh(data["product_type"], data["total_balance"] / 1e6, color=PALETTE["neutral"], height=0.6)
-    for y, value in enumerate(data["total_balance"] / 1e6):
-        ax.text(value, y, f" {value:,.1f}", va="center", fontsize=9, color=PALETTE["slate"])
-    ax.set_xlabel("Остаток, млн руб.")
-    ax.set_title(CHART_TITLES["portfolio"])
-    ax.grid(axis="x")
-    ax.set_axisbelow(True)
-    for spine in ("top", "right"):
-        ax.spines[spine].set_visible(False)
-    fig.tight_layout()
-    fig.savefig(path, dpi=150)
-    plt.close(fig)
+    with managed_figure(figsize=(9, 4.5)) as (fig, ax):
+        ax.barh(data["product_type"], data["total_balance"] / 1e6, color=PALETTE["neutral"], height=0.6)
+        for y, value in enumerate(data["total_balance"] / 1e6):
+            ax.text(value, y, f" {value:,.1f}", va="center", fontsize=9, color=PALETTE["slate"])
+        ax.set_xlabel("Остаток, млн руб.")
+        ax.set_title(CHART_TITLES["portfolio"])
+        ax.grid(axis="x")
+        ax.set_axisbelow(True)
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
+        fig.tight_layout()
+        fig.savefig(path, dpi=150)
     return path
 
 
@@ -92,26 +107,25 @@ def chart_funnel(rows: pd.DataFrame, path: Path) -> Path | None:
     if rows is None or rows.empty:
         _empty(path)
         return None
-    fig, ax = plt.subplots(figsize=(9, 4.5))
-    share = rows["from_start_pct"].astype(float)
-    ax.bar(rows["stage"], share, color=PALETTE["neutral"], width=0.6)
-    for x, value in enumerate(share):
-        if not np.isnan(value):
-            ax.text(x, value + 1.5, f"{value:.1f}%", ha="center", fontsize=9, color=PALETTE["slate"])
-    ax.set_ylim(0, max(105, float(np.nanmax(share)) + 10))
-    ax.set_ylabel("% от числа лидов")
-    ax.set_title(CHART_TITLES["funnel"])
-    ax.grid(axis="y")
-    ax.set_axisbelow(True)
-    for spine in ("top", "right"):
-        ax.spines[spine].set_visible(False)
-    # Workaround for matplotlib tight_layout recursion bug in Python 3.14
-    try:
-        fig.tight_layout()
-    except RecursionError:
-        pass
-    fig.savefig(path, dpi=150)
-    plt.close(fig)
+    with managed_figure(figsize=(9, 4.5)) as (fig, ax):
+        share = rows["from_start_pct"].astype(float)
+        ax.bar(rows["stage"], share, color=PALETTE["neutral"], width=0.6)
+        for x, value in enumerate(share):
+            if not np.isnan(value):
+                ax.text(x, value + 1.5, f"{value:.1f}%", ha="center", fontsize=9, color=PALETTE["slate"])
+        ax.set_ylim(0, max(105, float(np.nanmax(share)) + 10))
+        ax.set_ylabel("% от числа лидов")
+        ax.set_title(CHART_TITLES["funnel"])
+        ax.grid(axis="y")
+        ax.set_axisbelow(True)
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
+        # Workaround for matplotlib tight_layout recursion bug in Python 3.14
+        try:
+            fig.tight_layout()
+        except RecursionError:
+            pass
+        fig.savefig(path, dpi=150)
     return path
 
 
@@ -125,25 +139,24 @@ def chart_series(df: pd.DataFrame, value_col: str, period_col: str, path: Path,
         _empty(path)
         return None
 
-    fig, ax = plt.subplots(figsize=(10, 4.5))
-    ax.plot(data[period_col], data[value_col], color=PALETTE["neutral"],
-            linewidth=2.5, marker="o", markersize=6, label=label or None)
-    if len(data) >= 6:
-        window = max(3, min(12, len(data) // 4))
-        ax.plot(data[period_col], data[value_col].rolling(window, min_periods=1).mean(),
-                color=PALETTE["warning"], linewidth=2.0, linestyle="--",
-                label=f"Скользящее среднее, {window} п.")
-    ax.set_title(f"{title}{(' — ' + label) if label else ''}")
-    ax.set_ylabel("Значение")
-    ax.grid(axis="y")
-    ax.set_axisbelow(True)
-    if label or len(data) >= 6:
-        ax.legend(frameon=False, fontsize=9)
-    for spine in ("top", "right"):
-        ax.spines[spine].set_visible(False)
-    fig.tight_layout()
-    fig.savefig(path, dpi=150)
-    plt.close(fig)
+    with managed_figure(figsize=(10, 4.5)) as (fig, ax):
+        ax.plot(data[period_col], data[value_col], color=PALETTE["neutral"],
+                linewidth=2.5, marker="o", markersize=6, label=label or None)
+        if len(data) >= 6:
+            window = max(3, min(12, len(data) // 4))
+            ax.plot(data[period_col], data[value_col].rolling(window, min_periods=1).mean(),
+                    color=PALETTE["warning"], linewidth=2.0, linestyle="--",
+                    label=f"Скользящее среднее, {window} п.")
+        ax.set_title(f"{title}{(' — ' + label) if label else ''}")
+        ax.set_ylabel("Значение")
+        ax.grid(axis="y")
+        ax.set_axisbelow(True)
+        if label or len(data) >= 6:
+            ax.legend(frameon=False, fontsize=9)
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
+        fig.tight_layout()
+        fig.savefig(path, dpi=150)
     return path
 
 
@@ -158,20 +171,19 @@ def chart_anomalies(anomalies: pd.DataFrame, path: Path, label: str = "") -> Pat
         labels = [v.strftime("%Y-%m-%d") if hasattr(v, 'strftime') else str(v)[:10] for v in col]
     else:
         labels = col.astype(str).tolist()
-    fig, ax = plt.subplots(figsize=(10, 4.5))
-    colors = [PALETTE["negative"] if value > 0 else PALETTE["positive"] for value in data["_z"]]
-    ax.barh(labels, data["_z"], color=colors, height=0.6)
-    ax.axvline(3, color=PALETTE["negative"], linestyle="--", linewidth=1)
-    ax.axvline(-3, color=PALETTE["negative"], linestyle="--", linewidth=1)
-    ax.set_xlabel("Робастный Z-score")
-    ax.set_title(f"{CHART_TITLES['anomalies']}{(' — ' + label) if label else ''}")
-    ax.grid(axis="x")
-    ax.set_axisbelow(True)
-    for spine in ("top", "right"):
-        ax.spines[spine].set_visible(False)
-    fig.tight_layout()
-    fig.savefig(path, dpi=150)
-    plt.close(fig)
+    with managed_figure(figsize=(10, 4.5)) as (fig, ax):
+        colors = [PALETTE["negative"] if value > 0 else PALETTE["positive"] for value in data["_z"]]
+        ax.barh(labels, data["_z"], color=colors, height=0.6)
+        ax.axvline(3, color=PALETTE["negative"], linestyle="--", linewidth=1)
+        ax.axvline(-3, color=PALETTE["negative"], linestyle="--", linewidth=1)
+        ax.set_xlabel("Робастный Z-score")
+        ax.set_title(f"{CHART_TITLES['anomalies']}{(' — ' + label) if label else ''}")
+        ax.grid(axis="x")
+        ax.set_axisbelow(True)
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
+        fig.tight_layout()
+        fig.savefig(path, dpi=150)
     return path
 
 
@@ -181,27 +193,26 @@ def chart_forecast(forecast: dict, path: Path) -> Path | None:
         return None
     periods = forecast["periods"]
     scenarios = forecast["scenarios"]
-    fig, ax = plt.subplots(figsize=(10, 4.5))
-    base = scenarios.get("базовый", [])
-    ax.plot(periods, base, color=PALETTE["neutral"], linewidth=2.4, marker="o", label="Базовый")
-    if "оптимистичный" in scenarios:
-        ax.plot(periods, scenarios["оптимистичный"], color=PALETTE["positive"],
-                linewidth=1.4, linestyle="--", label="Оптимистичный")
-    if "пессимистичный" in scenarios:
-        ax.plot(periods, scenarios["пессимистичный"], color=PALETTE["negative"],
-                linewidth=1.4, linestyle="--", label="Пессимистичный")
-    ax.fill_between(range(len(periods)), scenarios.get("пессимистичный", base),
-                    scenarios.get("оптимистичный", base), color=PALETTE["neutral"], alpha=0.08)
-    ax.set_title(CHART_TITLES["forecast"])
-    ax.set_ylabel("Прогнозное значение")
-    ax.grid(axis="y")
-    ax.set_axisbelow(True)
-    ax.legend(frameon=False, fontsize=9)
-    for spine in ("top", "right"):
-        ax.spines[spine].set_visible(False)
-    fig.tight_layout()
-    fig.savefig(path, dpi=150)
-    plt.close(fig)
+    with managed_figure(figsize=(10, 4.5)) as (fig, ax):
+        base = scenarios.get("базовый", [])
+        ax.plot(periods, base, color=PALETTE["neutral"], linewidth=2.4, marker="o", label="Базовый")
+        if "оптимистичный" in scenarios:
+            ax.plot(periods, scenarios["оптимистичный"], color=PALETTE["positive"],
+                    linewidth=1.4, linestyle="--", label="Оптимистичный")
+        if "пессимистичный" in scenarios:
+            ax.plot(periods, scenarios["пессимистичный"], color=PALETTE["negative"],
+                    linewidth=1.4, linestyle="--", label="Пессимистичный")
+        ax.fill_between(range(len(periods)), scenarios.get("пессимистичный", base),
+                        scenarios.get("оптимистичный", base), color=PALETTE["neutral"], alpha=0.08)
+        ax.set_title(CHART_TITLES["forecast"])
+        ax.set_ylabel("Прогнозное значение")
+        ax.grid(axis="y")
+        ax.set_axisbelow(True)
+        ax.legend(frameon=False, fontsize=9)
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
+        fig.tight_layout()
+        fig.savefig(path, dpi=150)
     return path
 
 
@@ -209,25 +220,24 @@ def chart_correlation(corr: pd.DataFrame, path: Path) -> Path | None:
     if corr is None or corr.empty or len(corr) < 2:
         _empty(path)
         return None
-    fig, ax = plt.subplots(figsize=(8, 6.5))
-    image = ax.imshow(corr.values, cmap="RdYlBu_r", vmin=-1, vmax=1, aspect="auto")
-    fig.colorbar(image, ax=ax, label="Коэффициент корреляции")
-    ax.set_xticks(range(len(corr.columns)), corr.columns, rotation=45, ha="right", fontsize=9)
-    ax.set_yticks(range(len(corr.index)), corr.index, fontsize=9)
-    for i in range(len(corr.index)):
-        for j in range(len(corr.columns)):
-            value = corr.iloc[i, j]
-            if pd.notna(value):
-                ax.text(j, i, f"{value:.2f}", ha="center", va="center", fontsize=8,
-                        color="white" if abs(value) > 0.5 else "black")
-    ax.set_title(CHART_TITLES["correlation"])
-    # Workaround for matplotlib tight_layout recursion bug in Python 3.14
-    try:
-        fig.tight_layout()
-    except RecursionError:
-        pass
-    fig.savefig(path, dpi=150)
-    plt.close(fig)
+    with managed_figure(figsize=(8, 6.5)) as (fig, ax):
+        image = ax.imshow(corr.values, cmap="RdYlBu_r", vmin=-1, vmax=1, aspect="auto")
+        fig.colorbar(image, ax=ax, label="Коэффициент корреляции")
+        ax.set_xticks(range(len(corr.columns)), corr.columns, rotation=45, ha="right", fontsize=9)
+        ax.set_yticks(range(len(corr.index)), corr.index, fontsize=9)
+        for i in range(len(corr.index)):
+            for j in range(len(corr.columns)):
+                value = corr.iloc[i, j]
+                if pd.notna(value):
+                    ax.text(j, i, f"{value:.2f}", ha="center", va="center", fontsize=8,
+                            color="white" if abs(value) > 0.5 else "black")
+        ax.set_title(CHART_TITLES["correlation"])
+        # Workaround for matplotlib tight_layout recursion bug in Python 3.14
+        try:
+            fig.tight_layout()
+        except RecursionError:
+            pass
+        fig.savefig(path, dpi=150)
     return path
 
 

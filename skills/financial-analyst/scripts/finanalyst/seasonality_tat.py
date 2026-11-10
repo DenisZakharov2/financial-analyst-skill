@@ -12,56 +12,70 @@ I_NAT = np.iinfo(np.int64).min
 
 
 def _parse_dates_to_ns(date_strings: np.ndarray) -> np.ndarray:
-    """Разобрать массив дат/периодов в наносекунды int64 с фолбэком на parse_period."""
-    result = np.full(len(date_strings), I_NAT, dtype="int64")
-    for i, d in enumerate(date_strings):
-        if pd.isna(d) or d == "":
-            continue
-        s = str(d).strip()
-        try:
-            dt = np.datetime64(s, "ns")
-            result[i] = dt.astype("int64")
-            continue
-        except (ValueError, TypeError):
-            pass
-        ts, _ = parse_period(s)
-        if pd.notna(ts):
-            try:
+    """Разобрать массив дат/периодов в наносекунды int64 с фолбэком на parse_period.
+
+    Основная часть выгрузок в формате ISO-8601 («2024-05-01», «2024-05»)
+    разбирается векторно; точечный разбор `parse_period` остаётся только для
+    значений, которые pandas не понял («15.05.2024», «1к24», «январь 2024»).
+    """
+    count = len(date_strings)
+    result = np.full(count, I_NAT, dtype="int64")
+    if count == 0:
+        return result
+
+    series = pd.Series(date_strings, dtype=object)
+    try:
+        fast = pd.to_datetime(series, format="ISO8601", errors="coerce")
+    except (ValueError, TypeError):
+        fast = None
+
+    if fast is not None:
+        if isinstance(fast.dtype, pd.DatetimeTZDtype):
+            fast = fast.dt.tz_convert("UTC").dt.tz_localize(None)
+        values = fast.to_numpy(dtype="datetime64[ns]", na_value=np.datetime64("NaT"))
+        result = values.astype("int64")
+
+    unresolved = result == I_NAT
+    if unresolved.any():
+        for idx in np.flatnonzero(unresolved):
+            val = date_strings[idx]
+            if pd.isna(val) or str(val).strip() == "":
+                continue
+            ts, _ = parse_period(str(val).strip())
+            if pd.notna(ts):
                 iso = f"{int(ts.year):04d}-{int(ts.month):02d}-{int(ts.day):02d}"
-                result[i] = np.datetime64(iso, "ns").astype("int64")
-            except (ValueError, TypeError, AttributeError):
-                pass
+                result[idx] = np.datetime64(iso, "ns").astype("int64")
     return result
 
 
 def _ns_to_datetime_str(ns_array: np.ndarray) -> np.ndarray:
     """Convert int64 nanoseconds to YYYY-MM-DD string array."""
     result = np.full(len(ns_array), "", dtype=object)
-    for i, ns in enumerate(ns_array):
-        if ns != I_NAT:
-            dt = np.datetime64(int(ns), "ns")
-            result[i] = str(dt)[:10]
+    valid = ns_array != I_NAT
+    if valid.any():
+        dates = ns_array[valid].astype("datetime64[ns]").astype(str)
+        result[valid] = np.array([value[:10] for value in dates], dtype=object)
     return result
 
 
 def _ns_to_month(ns_array: np.ndarray) -> np.ndarray:
     """Extract month (1-12) from int64 nanoseconds."""
     result = np.zeros(len(ns_array), dtype=int)
-    for i, ns in enumerate(ns_array):
-        if ns != I_NAT:
-            dt = np.datetime64(int(ns), "ns")
-            result[i] = int(str(dt)[5:7])
+    valid = ns_array != I_NAT
+    if valid.any():
+        # datetime64[M] даёт индекс месяца с эпохи: номер месяца в году —
+        # остаток от деления на 12 плюс один.
+        months = ns_array[valid].astype("datetime64[ns]").astype("datetime64[M]")
+        result[valid] = (months.astype("int64") % 12) + 1
     return result
 
 
 def _ns_to_quarter(ns_array: np.ndarray) -> np.ndarray:
     """Extract quarter (1-4) from int64 nanoseconds."""
     result = np.zeros(len(ns_array), dtype=int)
-    for i, ns in enumerate(ns_array):
-        if ns != I_NAT:
-            dt = np.datetime64(int(ns), "ns")
-            month = int(str(dt)[5:7])
-            result[i] = (month - 1) // 3 + 1
+    months = _ns_to_month(ns_array)
+    valid = ns_array != I_NAT
+    result[valid] = (months[valid] - 1) // 3 + 1
     return result
 
 
@@ -71,11 +85,21 @@ def funnel_tat(
     sla_days: dict[str, float] | float = 3.0,
     reference_date: str | None = None,
 ) -> dict:
-    """Рассчитать время прохождения этапов воронки (TAT), выполнение SLA и зависший бэклог."""
+    """Рассчитать время прохождения этапов воронки (TAT), выполнение SLA и зависший бэклог.
+
+    Переходы делятся на смежные (``лид -> заявка``) и «сквозные» (``лид ->
+    одобрение`` без промежуточного этапа). В расчёт TAT и SLA входят только
+    смежные переходы: «сквозной» переход измеряет охват нескольких этапов, и
+    подставлять его в норматив одного этапа нельзя. «Сквозные» переходы
+    возвращаются отдельной таблицей `skipped_transitions`.
+    """
     if events is None or events.empty:
         return {
             "available": False,
             "by_transition": pd.DataFrame(),
+            "skipped_transitions": pd.DataFrame(),
+            "skipped_count": 0,
+            "backward_count": 0,
             "by_segment": pd.DataFrame(),
             "aging_backlog": pd.DataFrame(),
             "survival_curve": pd.DataFrame(),
@@ -89,6 +113,9 @@ def funnel_tat(
         return {
             "available": False,
             "by_transition": pd.DataFrame(),
+            "skipped_transitions": pd.DataFrame(),
+            "skipped_count": 0,
+            "backward_count": 0,
             "by_segment": pd.DataFrame(),
             "aging_backlog": pd.DataFrame(),
             "survival_curve": pd.DataFrame(),
@@ -117,6 +144,9 @@ def funnel_tat(
         return {
             "available": False,
             "by_transition": pd.DataFrame(),
+            "skipped_transitions": pd.DataFrame(),
+            "skipped_count": 0,
+            "backward_count": 0,
             "by_segment": pd.DataFrame(),
             "aging_backlog": pd.DataFrame(),
             "survival_curve": pd.DataFrame(),
@@ -172,25 +202,43 @@ def funnel_tat(
             next_dt_ns[i] = g_event_dt_ns[i + 1]
 
     valid_transition = (next_dt_ns != I_NAT) & (g_event_dt_ns != I_NAT) & (next_dt_ns >= g_event_dt_ns)
+    # Разрыв между этапами: 1 — смежный переход, больше 1 — пропущен этап,
+    # 0 или меньше — возврат на предыдущий этап (в TAT не идёт).
+    rank_gap = np.full(grouped_n, -1, dtype=int)
+    has_next = next_rank >= 0
+    rank_gap[has_next] = next_rank[has_next] - g_stage_rank[has_next]
     tat_days = np.full(grouped_n, np.nan, dtype="float64")
     tat_days[valid_transition] = (
         (next_dt_ns[valid_transition] - g_event_dt_ns[valid_transition]) / 86400_000_000_000.0
     )
 
     valid_mask = ~np.isnan(tat_days) & (tat_days >= 0)
-    if not np.any(valid_mask):
+    adjacent_mask = valid_mask & (rank_gap == 1)
+    skipped_mask = valid_mask & (rank_gap > 1)
+    backward_mask = valid_mask & (rank_gap <= 0)
+    skipped_count = int(skipped_mask.sum())
+    backward_count = int(backward_mask.sum())
+
+    if not np.any(adjacent_mask):
         return {
             "available": False,
             "by_transition": pd.DataFrame(),
+            "skipped_transitions": pd.DataFrame(),
+            "skipped_count": skipped_count,
+            "backward_count": backward_count,
             "by_segment": pd.DataFrame(),
             "aging_backlog": pd.DataFrame(),
             "survival_curve": pd.DataFrame(),
-            "assumption": "Нет валидных переходов между этапами.",
+            "assumption": (
+                "Нет ни одного смежного перехода между этапами: в выгрузке "
+                + (f"{skipped_count} переходов с пропущенным этапом. " if skipped_count else "")
+                + "Проверьте журнал событий воронки."
+            ),
         }
 
-    v_transition = g_stage_norm[valid_mask] + " -> " + next_stage[valid_mask]
-    v_from_stage = g_stage_norm[valid_mask]
-    v_tat = tat_days[valid_mask]
+    v_transition = g_stage_norm[adjacent_mask] + " -> " + next_stage[adjacent_mask]
+    v_from_stage = g_stage_norm[adjacent_mask]
+    v_tat = tat_days[adjacent_mask]
 
     def _threshold_for(trans_name: str, from_stage: str) -> float:
         if isinstance(sla_days, dict):
@@ -220,6 +268,30 @@ def funnel_tat(
         )
 
     by_transition_df = pd.DataFrame(transition_rows)
+
+    # Переходы с пропущенным этапом («лид → одобрение» без «заявки»): это
+    # суммарный охват нескольких этапов, а не время одного этапа, поэтому они
+    # не участвуют в расчёте SLA и идут отдельной таблицей.
+    skipped_rows: list[dict] = []
+    if np.any(skipped_mask):
+        s_transition = g_stage_norm[skipped_mask] + " -> " + next_stage[skipped_mask]
+        s_gap = rank_gap[skipped_mask]
+        s_tat = tat_days[skipped_mask]
+        for trans_name in np.unique(s_transition):
+            t_mask = s_transition == trans_name
+            vals = s_tat[t_mask]
+            p50, p90 = np.percentile(vals, [50, 90])
+            skipped_rows.append(
+                {
+                    "transition": str(trans_name),
+                    "stages_skipped": int(np.max(s_gap[t_mask])),
+                    "count": int(len(vals)),
+                    "mean_days": round(float(np.mean(vals)), 2),
+                    "median_p50_days": round(float(p50), 2),
+                    "p90_days": round(float(p90), 2),
+                }
+            )
+    skipped_df = pd.DataFrame(skipped_rows)
 
     unique_entities = np.unique(g_entity)
     app_span_rows = []
@@ -380,13 +452,20 @@ def funnel_tat(
     return {
         "available": not by_transition_df.empty,
         "by_transition": by_transition_df,
+        "skipped_transitions": skipped_df,
+        "skipped_count": skipped_count,
+        "backward_count": backward_count,
         "by_segment": by_segment_df,
         "aging_backlog": aging_df,
         "survival_curve": survival_df,
         "reference_date": ref_dt_str,
         "assumption": (
-            "TAT рассчитан по фактическим датам переходов между этапами STAGE_ORDER. "
-            f"Незавершённые заявки выделены в блок aging_backlog на дату среза {ref_dt_str or 'макс. даты'}."
+            "TAT рассчитан по фактическим датам переходов между соседними этапами STAGE_ORDER. "
+            + (f"Пропущено этапов в {skipped_count} переходах — они вынесены в отдельную таблицу "
+               "и не участвуют в расчёте SLA. " if skipped_count else "")
+            + (f"Ещё {backward_count} переходов возвращают клиента на предыдущий этап — "
+               "в TAT не включены. " if backward_count else "")
+            + f"Незавершённые заявки выделены в блок aging_backlog на дату среза {ref_dt_str or 'макс. даты'}."
         ),
     }
 

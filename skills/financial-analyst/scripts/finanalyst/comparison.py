@@ -139,6 +139,19 @@ def portfolio_bridge(
     }
 
 
+def _safe_delta_pct(v0: float, v1: float) -> float | None:
+    """Относительное изменение с честной обработкой нулевой базы.
+
+    Если в базовом срезе показатель был нулевым, а в целевом — нет, процент
+    изменения не определён: считать его нулём нельзя, это читается как
+    «динамики нет». В этом случае возвращается ``None`` (в отчёте — прочерк),
+    а сам факт появления показателя фиксируется в ``delta_abs``.
+    """
+    if abs(v0) <= 1e-9:
+        return 0.0 if abs(v1) <= 1e-9 else None
+    return round((v1 - v0) / abs(v0) * 100.0, 2)
+
+
 def compare_snapshots(
     tables_base: dict[str, pd.DataFrame],
     tables_target: dict[str, pd.DataFrame],
@@ -173,14 +186,15 @@ def compare_snapshots(
             v0 = float(pd.to_numeric(fin_b_clean[col], errors="coerce").fillna(0.0).sum())
             v1 = float(pd.to_numeric(fin_t_clean[col], errors="coerce").fillna(0.0).sum())
             delta = v1 - v0
-            pct = (delta / abs(v0) * 100.0) if abs(v0) > 1e-9 else 0.0
+            pct = _safe_delta_pct(v0, v1)
             fin_deltas.append(
                 {
                     "metric": col,
                     f"value_{label_base}": round(v0, 2),
                     f"value_{label_target}": round(v1, 2),
                     "delta_abs": round(delta, 2),
-                    "delta_pct": round(pct, 2),
+                    "delta_pct": pct,
+                    "delta_pct_note": "" if pct is not None else "в базовом срезе показатель был нулевым",
                 }
             )
 

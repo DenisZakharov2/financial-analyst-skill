@@ -110,12 +110,63 @@ COLUMN_TITLES = {
     "metric": "Показатель",
     "delta_abs": "Изменение",
     "delta_pct": "Темп, %",
+    "delta_pct_note": "Примечание",
+    "value_base": "Значение (база)",
+    "value_target": "Значение (цель)",
 }
 
 
 def column_title(column: str) -> str:
     """Русская подпись колонки; неизвестное имя остаётся как есть."""
     return COLUMN_TITLES.get(str(column), str(column))
+
+
+def _max_columns(report: "ReportData") -> int:
+    """Максимальное число столбцов среди таблиц отчёта."""
+    widest = 0
+    for _name, frame, _note in report.sections:
+        if frame is not None and not frame.empty:
+            widest = max(widest, len(frame.columns))
+    return widest
+
+
+def _column_widths(columns: list[str], total_width: float) -> list[float]:
+    """Ширины столбцов таблицы в пределах полосы набора.
+
+    Первый столбец обычно содержит подписи (продукт, период, канал), поэтому
+    ему отдаётся большая доля; остальные делят остаток поровну. Без явных
+    ширин ReportLab подбирал их по содержимому, и широкая таблица выходила
+    за поля страницы.
+    """
+    count = len(columns)
+    if count == 0:
+        return []
+    if count == 1:
+        return [total_width]
+    if count == 2:
+        return [total_width * 0.6, total_width * 0.4]
+    first_share = 0.28 if count >= 4 else 0.4
+    rest = (total_width * (1 - first_share)) / (count - 1)
+    return [total_width * first_share] + [rest] * (count - 1)
+
+
+def _scaled_image_size(path: Path, max_width: float, max_height: float) -> tuple[float, float]:
+    """Размер изображения с сохранением пропорций.
+
+    Фиксированные 6.9×3.4 дюйма искажали графики с нестандартным
+    соотношением сторон (например, круговую диаграмму).
+    """
+    try:
+        from PIL import Image as PILImage
+
+        with PILImage.open(path) as image:
+            width, height = image.size
+    except Exception:  # noqa: BLE001 - при любой ошибке используем безопасный размер
+        return max_width, max_height
+    if not width or not height:
+        return max_width, max_height
+    ratio = min(max_width / width, max_height / height)
+    return width * ratio, height * ratio
 
 
 def _numeric_positions(frame: pd.DataFrame) -> set[int]:
@@ -374,6 +425,13 @@ def write_pdf(report: ReportData, path: Path) -> Path:
     styles.add(ParagraphStyle(name="RuCell", parent=styles["BodyText"], fontName="DejaVu",
                               fontSize=7.5, leading=9.5))
 
+    # Полезная ширина листа A4 при полях 40 pt слева и справа.
+    available_width = A4[0] - 80
+    # Чем больше столбцов, тем мельче кегль: иначе в когортной матрице
+    # (12–24 месяца) текст не помещается в ячейку.
+    cell_font = 6.5 if _max_columns(report) > 8 else 7.5
+    cell_leading = cell_font + 2.0
+
     def page_number(canvas, doc):
         canvas.setFont("DejaVu", 8)
         canvas.setFillColor(colors.HexColor("#6b7280"))
@@ -393,14 +451,22 @@ def write_pdf(report: ReportData, path: Path) -> Path:
     story.append(Spacer(1, 12))
 
     def make_table(frame: pd.DataFrame, numeric: set[int] | None = None) -> Table:
+        columns = list(frame.columns)
         data = [list(frame.columns)] + frame.astype(str).values.tolist()
-        table = Table(data, repeatRows=1, hAlign="LEFT")
+        # Текст в ячейках оборачивается в Paragraph: иначе длинная строка
+        # (например, примечание) выходила за границу колонки и налезала
+        # на соседние столбцы.
+        cell_style = ParagraphStyle(name="RuTableCell", parent=styles["RuCell"],
+                                     fontSize=cell_font, leading=cell_leading)
+        wrapped = [[Paragraph(escape(str(value)), cell_style) for value in row] for row in data]
+        table = Table(wrapped, repeatRows=1, hAlign="LEFT",
+                      colWidths=_column_widths(columns, available_width))
         rules = [
             ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f3f4f6")),
             ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#374151")),
             ("FONTNAME", (0, 0), (-1, -1), "DejaVu"),
-            ("FONTSIZE", (0, 0), (-1, -1), 7.5),
-            ("LEADING", (0, 0), (-1, -1), 9.5),
+            ("FONTSIZE", (0, 0), (-1, -1), cell_font),
+            ("LEADING", (0, 0), (-1, -1), cell_leading),
             ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#e5e7eb")),
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
             ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f9fafb")]),
@@ -452,7 +518,8 @@ def write_pdf(report: ReportData, path: Path) -> Path:
             continue
         story.append(PageBreak())
         story.append(Paragraph(escape(_chart_title(name)), styles["RuHeading"]))
-        story.append(Image(str(chart), width=6.9 * inch, height=3.4 * inch))
+        width, height = _scaled_image_size(Path(chart), 6.9 * inch, 4.2 * inch)
+        story.append(Image(str(chart), width=width, height=height))
 
     document.build(story, onFirstPage=page_number, onLaterPages=page_number)
     return path

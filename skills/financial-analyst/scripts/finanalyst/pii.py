@@ -96,6 +96,52 @@ FIO_RU_RE = re.compile(
 )
 DIGITS_ONLY_RE = re.compile(r"\D+")
 
+# Пороги детекции ПДн по содержимому колонки (доля совпадений в выборке).
+PII_CONTENT_THRESHOLD = 0.05
+FIO_CONTENT_THRESHOLD = 0.10
+SNILS_CONTENT_THRESHOLD = 0.10
+CHECKSUM_CONTENT_THRESHOLD = 0.25
+
+
+def _pii_threshold(sample_size: int) -> int:
+    """Порог для колонок с надёжным признаком (email, телефон).
+
+    Совпадение шаблона почти не бывает случайным, поэтому достаточно 5 %
+    выборки; на маленькой выборке хватает одного совпадения, на большой
+    порог ограничен тремя строками.
+    """
+    if sample_size <= 0:
+        return 1
+    return max(1, min(3, int(PII_CONTENT_THRESHOLD * sample_size)))
+
+
+def _fio_threshold(sample_size: int) -> int:
+    """Порог для ФИО: сигнал слабее (три слова могут быть техническим кодом)."""
+    if sample_size <= 0:
+        return 2
+    return max(2, min(3, int(FIO_CONTENT_THRESHOLD * sample_size)))
+
+
+def _snils_threshold(sample_size: int) -> int:
+    """Порог для СНИЛС: контрольное число проходит примерно 1 % случайных номеров."""
+    if sample_size <= 0:
+        return 2
+    return max(2, min(3, int(SNILS_CONTENT_THRESHOLD * sample_size)))
+
+
+def _checksum_threshold(sample_size: int) -> int:
+    """Порог для карт по Луну и ИНН.
+
+    Контрольные разряды проходят около 10 % случайных чисел, поэтому порог
+    5 % здесь давал бы ложные срабатывания на технических идентификаторах
+    (16-значные номера операций, 10-значные номера договоров) — колонка была
+    бы молча удалена при обезличивании. Порог 25 % надёжно отделяет настоящие
+    карты и ИНН от случайно подходящих номеров.
+    """
+    if sample_size <= 0:
+        return 3
+    return max(3, int(-(-CHECKSUM_CONTENT_THRESHOLD * sample_size // 1)))
+
 
 @dataclass(frozen=True)
 class PIIFinding:
@@ -134,9 +180,17 @@ def is_valid_inn(value: str) -> bool:
 
 
 def is_valid_snils(value: str) -> bool:
-    """Проверка 11-значного СНИЛС по контрольному числу ПФР/СФР."""
+    """Проверка 11-значного СНИЛС по контрольному числу ПФР/СФР.
+
+    Дополнительно проверяется правило СФР: в первых девяти разрядах номера
+    не может быть трёх одинаковых цифр подряд (``111-111-111``). Без этой
+    проверки технические 11-значные идентификаторы с корректной контрольной
+    суммой проходили бы как СНИЛС.
+    """
     digits = DIGITS_ONLY_RE.sub("", value)
     if len(digits) != 11 or digits[:9] <= "001001998":
+        return False
+    if re.search(r"(\d)\1\1", digits[:9]):
         return False
     total = sum(int(digits[i]) * (9 - i) for i in range(9))
     if total < 100:
@@ -189,29 +243,36 @@ def _detect_series_pii_type(series: pd.Series, col_name: str) -> tuple[str | Non
         return None, 0
 
     sample = non_null.head(500)
+    # Порог по содержимому: прежние 30 % (50 % для ИНН) пропускали колонки,
+    # где ПДн заполнены у 5–20 % клиентов. Для email и телефона (надёжный
+    # шаблон) достаточно 5 % выборки; для ФИО, СНИЛС, карт и ИНН пороги выше —
+    # см. функции _pii_threshold, _fio_threshold, _snils_threshold,
+    # _checksum_threshold.
     # Avoid .map() which triggers segfault in pandas 2.2.3/numpy 2.1.3
     email_hits = int(sum(bool(EMAIL_RE.match(x)) for x in sample))
-    if email_hits >= max(1, int(0.3 * len(sample))):
+    if email_hits >= _pii_threshold(len(sample)):
         return "email", email_hits
 
     phone_hits = int(sum(bool(PHONE_RU_RE.match(x)) for x in sample))
-    if phone_hits >= max(1, int(0.3 * len(sample))):
+    if phone_hits >= _pii_threshold(len(sample)):
         return "phone_ru", phone_hits
 
+    # ФИО: сигнал слабее (два слова могут быть техническим кодом), поэтому порог
+    # выше — 10 % совпадений в выборке.
     fio_hits = int(sum(bool(FIO_RU_RE.match(x)) for x in sample))
-    if fio_hits >= max(1, int(0.3 * len(sample))):
+    if fio_hits >= _fio_threshold(len(sample)):
         return "fio_ru", fio_hits
 
     card_hits = int(sum(is_valid_luhn_card(x) for x in sample))
-    if card_hits >= max(1, int(0.3 * len(sample))):
+    if card_hits >= _checksum_threshold(len(sample)):
         return "bank_card_luhn", card_hits
 
     snils_hits = int(sum(is_valid_snils(x) for x in sample))
-    if snils_hits >= max(1, int(0.3 * len(sample))):
+    if snils_hits >= _snils_threshold(len(sample)):
         return "snils_checksum", snils_hits
 
     inn_hits = int(sum(is_valid_inn(x) for x in sample))
-    if inn_hits >= max(1, int(0.5 * len(sample))):
+    if inn_hits >= _checksum_threshold(len(sample)):
         return "inn_checksum", inn_hits
 
     return None, 0
