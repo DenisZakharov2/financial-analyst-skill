@@ -23,7 +23,7 @@ def _normalize_stage(value: object) -> str:
 
 def _parse_dates_to_ns(date_strings: np.ndarray) -> np.ndarray:
     """Parse date strings directly to int64 nanoseconds using numpy datetime64.
-    
+
     Avoids pandas datetime64 segfault bug in pandas 2.2.3 + numpy 2.1.3.
     Invalid dates become I_NAT.
     """
@@ -110,7 +110,7 @@ def funnel_tat(
     stage_rank = np.array([STAGE_RANK.get(s, 0) for s in stage_norm], dtype=int)
     entity_ids = df[entity_col].to_numpy()
     event_dt_ns = _parse_dates_to_ns(df["event_date"].to_numpy())
-    
+
     has_product = "product_code" in df.columns
     has_channel = "channel" in df.columns
     product_codes = df["product_code"].to_numpy() if has_product else np.array([""] * len(entity_ids))
@@ -218,10 +218,10 @@ def funnel_tat(
 
     v_transition = g_stage_norm[valid_mask] + " -> " + next_stage[valid_mask]
     v_from_stage = g_stage_norm[valid_mask]
-    v_to_stage = next_stage[valid_mask]
+    next_stage[valid_mask]
     v_tat = tat_days[valid_mask]
-    v_product = g_product[valid_mask]
-    v_channel = g_channel[valid_mask]
+    g_product[valid_mask]
+    g_channel[valid_mask]
 
     def _threshold_for(trans_name: str, from_stage: str) -> float:
         if isinstance(sla_days, dict):

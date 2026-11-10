@@ -8,12 +8,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import hashlib
 import hmac
 import os
 import re
 import secrets
+from dataclasses import dataclass
 from typing import Literal
 
 import pandas as pd

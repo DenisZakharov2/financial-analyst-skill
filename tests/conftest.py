@@ -23,7 +23,7 @@ def _str_from_months(months: int) -> str:
 
 def date_strings(start: str, periods: int, freq: str = "M") -> list[str]:
     """Generate list of YYYY-MM strings without pandas datetime operations.
-    
+
     Args:
         start: Start date as "YYYY-MM"
         periods: Number of periods
@@ -39,7 +39,7 @@ def date_strings(start: str, periods: int, freq: str = "M") -> list[str]:
         step = 0  # Not used for daily
     else:
         step = 1
-    
+
     start_months = _months_from_str(start)
     result = []
     for i in range(periods):

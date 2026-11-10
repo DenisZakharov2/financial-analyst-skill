@@ -205,7 +205,7 @@ def report_timestamp(report: ReportData, fmt: str = "%d.%m.%Y %H:%M") -> str:
             dt = datetime.now()
     else:
         dt = datetime.now()
-    
+
     # Format without strftime to avoid locale issues
     if fmt == "%d.%m.%Y %H:%M":
         return f"{dt.day:02d}.{dt.month:02d}.{dt.year:04d} {dt.hour:02d}:{dt.minute:02d}"

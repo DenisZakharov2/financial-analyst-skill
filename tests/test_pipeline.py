@@ -175,11 +175,12 @@ def test_cbr_adapter_accepts_any_workbook_name(tmp_path, date_strings_fixture):
 
 def test_macro_survey_correlations(tmp_path, date_strings_fixture):
     import sys
+
     import pytest
     # Skip on Python 3.14+ due to matplotlib RecursionError in chart_correlation
     if sys.version_info >= (3, 14):
         pytest.skip("chart_correlation has RecursionError on Python 3.14+ (matplotlib bug)")
-    
+
     data = tmp_path / "survey"
     data.mkdir()
     rows = []

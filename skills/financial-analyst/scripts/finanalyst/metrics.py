@@ -579,16 +579,16 @@ def _yoy_pct(work: pd.DataFrame, value_col: str, period_col: str) -> pd.Series |
     for p in periods:
         m = _parse_ym_to_months(str(p))
         period_months.append(m)
-    
+
     # Build lookup: month -> value
     lookup = {}
     for m, v in zip(period_months, work[value_col]):
         if m is not None and pd.notna(v):
             lookup[m] = float(v)
-    
+
     if not lookup:
         return None
-    
+
     # For each period, find value 12 months ago
     previous_vals = []
     for m in period_months:
@@ -596,7 +596,7 @@ def _yoy_pct(work: pd.DataFrame, value_col: str, period_col: str) -> pd.Series |
             previous_vals.append(lookup[m - 12])
         else:
             previous_vals.append(np.nan)
-    
+
     previous_series = pd.Series(previous_vals, index=work.index)
     return _pct_change(work[value_col].astype("float64"), previous_series)
 

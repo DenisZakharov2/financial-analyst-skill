@@ -17,6 +17,7 @@ import pandas as pd
 
 from . import __version__
 from .adapters import cbr_survey, client_csv
+from .comparison import compare_snapshots
 from .core import (
     KNOWN_TABLES,
     WORKBOOK_SUFFIXES,
@@ -40,9 +41,8 @@ from .metrics import (
     unit_economics,
 )
 from .pii import sanitize_tables
-from .seasonality_tat import funnel_tat, seasonality_summary
-from .comparison import compare_snapshots
 from .reporting import ReportData, fmt_num, quality_frame, write_html, write_reports
+from .seasonality_tat import funnel_tat, seasonality_summary
 from .visuals import (
     build_dashboard,
     chart_anomalies,
@@ -697,7 +697,7 @@ def run(args: argparse.Namespace) -> int:
                              comparison["assumption"]))
             bridge = comparison["portfolio_bridge"]
             if bridge.get("available"):
-                sections.append((f"Сравнение: портфельный Bridge", bridge["bridge_table"],
+                sections.append(("Сравнение: портфельный Bridge", bridge["bridge_table"],
                                  f"Δ портфель: {bridge['balance_delta']:,.2f} ({bridge['balance_growth_pct']:.2f}%), "
                                  f"Retention: {bridge['client_retention_pct']:.2f}%, NRR: {bridge['net_dollar_retention_pct']:.2f}%"))
                 headline.append(headline_row(
@@ -713,7 +713,7 @@ def run(args: argparse.Namespace) -> int:
                     "portfolio"
                 ))
             if not comparison["finance_comparison"].empty:
-                sections.append((f"Сравнение: P&L", comparison["finance_comparison"], ""))
+                sections.append(("Сравнение: P&L", comparison["finance_comparison"], ""))
             metrics_payload["sections"]["comparison"] = {
                 "labels": comparison["labels"],
                 "schema": {k: records(v) if hasattr(v, "to_dict") else v
