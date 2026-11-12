@@ -16,6 +16,7 @@ import secrets
 from dataclasses import dataclass
 from typing import Literal
 
+import numpy as np
 import pandas as pd
 
 PII_COLUMN_NAMES: frozenset[str] = frozenset(
@@ -23,7 +24,6 @@ PII_COLUMN_NAMES: frozenset[str] = frozenset(
         "fio",
         "full_name",
         "client_name",
-        "name",
         "first_name",
         "last_name",
         "middle_name",
@@ -55,6 +55,7 @@ JOIN_KEY_COLUMNS: frozenset[str] = frozenset(
         "deal_id",
         "event_id",
         "transaction_id",
+        "txn_id",
         "manager_id",
         "campaign_id",
     }
@@ -63,7 +64,10 @@ JOIN_KEY_COLUMNS: frozenset[str] = frozenset(
 SAFE_CODE_COLUMNS: frozenset[str] = frozenset(
     {
         "product_code",
+        "product_name",
         "product_type",
+        "industry",
+        "indicator",
         "segment",
         "region",
         "acquisition_channel",
@@ -119,7 +123,7 @@ def _fio_threshold(sample_size: int) -> int:
     """Порог для ФИО: сигнал слабее (три слова могут быть техническим кодом)."""
     if sample_size <= 0:
         return 2
-    return max(2, min(3, int(FIO_CONTENT_THRESHOLD * sample_size)))
+    return max(2, int(FIO_CONTENT_THRESHOLD * sample_size))
 
 
 def _snils_threshold(sample_size: int) -> int:
@@ -233,16 +237,12 @@ def _detect_series_pii_type(series: pd.Series, col_name: str) -> tuple[str | Non
     if norm_col in PII_COLUMN_NAMES:
         return f"column_name:{norm_col}", int(len(non_null))
 
-    if norm_col in SAFE_CODE_COLUMNS or norm_col in JOIN_KEY_COLUMNS:
+    if norm_col in SAFE_CODE_COLUMNS:
         return None, 0
 
-    if not (
-        pd.api.types.is_object_dtype(series.dtype)
-        or pd.api.types.is_string_dtype(series.dtype)
-    ):
-        return None, 0
-
-    sample = non_null.head(500)
+    sample = non_null
+    if len(sample) > 500:
+        sample = pd.concat([non_null.head(250), non_null.tail(250)], ignore_index=True)
     # Порог по содержимому: прежние 30 % (50 % для ИНН) пропускали колонки,
     # где ПДн заполнены у 5–20 % клиентов. Для email и телефона (надёжный
     # шаблон) достаточно 5 % выборки; для ФИО, СНИЛС, карт и ИНН пороги выше —
@@ -299,14 +299,28 @@ def scan_pii(tables: dict[str, pd.DataFrame]) -> list[PIIFinding]:
     return findings
 
 
+def _id_text(value: object) -> str:
+    """Одинаковый текст идентификатора для int 1 и float 1.0."""
+    if isinstance(value, bool):
+        return str(value).strip()
+    if isinstance(value, (int, np.integer)):
+        return str(int(value))
+    if isinstance(value, (float, np.floating)) and np.isfinite(value) and float(value).is_integer():
+        return str(int(value))
+    text = str(value).strip()
+    if re.fullmatch(r"-?\d+\.0+", text):
+        return text.split(".", 1)[0]
+    return text
+
+
 def _hmac_token(value: object, key_bytes: bytes, prefix: str) -> object:
     """Детерминированный HMAC-токен для идентификатора с сохранением пустых значений."""
     if pd.isna(value):
         return value
-    raw = str(value).strip()
+    raw = _id_text(value)
     if not raw:
         return value
-    digest = hmac.new(key_bytes, raw.encode("utf-8"), hashlib.sha256).hexdigest()[:10].upper()
+    digest = hmac.new(key_bytes, raw.encode("utf-8"), hashlib.sha256).hexdigest()[:16].upper()
     return f"{prefix}-{digest}"
 
 
@@ -344,6 +358,7 @@ def sanitize_tables(
         )
 
     raw_key = secret_key or os.environ.get("FINANALYST_PII_KEY") or secrets.token_hex(32)
+    key_ephemeral = mode == "redact" and secret_key is None and not os.environ.get("FINANALYST_PII_KEY")
     key_bytes = raw_key.encode("utf-8")
 
     prefix_map = {
@@ -399,9 +414,15 @@ def sanitize_tables(
         "pii_found": bool(findings),
         "findings": [f.to_dict() for f in applied_findings],
         "pseudonymized_columns": sorted(set(pseudonymized_cols)),
+        "key_ephemeral": key_ephemeral,
         "assumption": (
             "Прямые ПДн удалены на уровне колонок, идентификаторы заменены сквозным HMAC-SHA256 "
-            "с сохранением связей между таблицами; числовые финансовые поля не изменялись."
+            "(16 hex-символов). "
+            + (
+                "Ключ сгенерирован на один запуск: без FINANALYST_PII_KEY псевдонимы не воспроизводятся. "
+                if key_ephemeral else ""
+            )
+            + "Числовые финансовые поля не изменялись."
             if mode == "redact"
             else "Входной контроль ПДн пройден: запрещённые колонки отсутствуют."
         ),

@@ -87,11 +87,12 @@ def funnel_tat(
 ) -> dict:
     """Рассчитать время прохождения этапов воронки (TAT), выполнение SLA и зависший бэклог.
 
-    Переходы делятся на смежные (``лид -> заявка``) и «сквозные» (``лид ->
+    Переходы делятся на смежные (``лид -> обращение``) и «сквозные» (``лид ->
     одобрение`` без промежуточного этапа). В расчёт TAT и SLA входят только
     смежные переходы: «сквозной» переход измеряет охват нескольких этапов, и
     подставлять его в норматив одного этапа нельзя. «Сквозные» переходы
-    возвращаются отдельной таблицей `skipped_transitions`.
+    возвращаются отдельной таблицей `skipped_transitions`. Возврат на более
+    ранний этап считается отдельно и в TAT не входит.
     """
     if events is None or events.empty:
         return {
@@ -122,7 +123,10 @@ def funnel_tat(
             "assumption": "В таблице воронки отсутствуют обязательные колонки (application_id/client_id, stage, event_date).",
         }
 
-    stage_norm = np.array([_normalize_stage(s) if pd.notna(s) else "" for s in df["stage"].to_numpy()])
+    stage_norm = np.array(
+        [_normalize_stage(s) if pd.notna(s) else "" for s in df["stage"].to_numpy()],
+        dtype=object,
+    )
     stage_rank = np.array([STAGE_RANK.get(s, 0) for s in stage_norm], dtype=int)
     entity_ids = df[entity_col].to_numpy()
     event_dt_ns = _parse_dates_to_ns(df[date_col].to_numpy())
@@ -153,7 +157,7 @@ def funnel_tat(
             "assumption": "После очистки дат и этапов не осталось валидных событий воронки.",
         }
 
-    sort_idx = np.lexsort((event_dt_ns, stage_rank, entity_ids))
+    sort_idx = np.lexsort((stage_rank, event_dt_ns, entity_ids))
     entity_ids = entity_ids[sort_idx]
     stage_norm = stage_norm[sort_idx]
     stage_rank = stage_rank[sort_idx]
@@ -161,80 +165,39 @@ def funnel_tat(
     product_codes = product_codes[sort_idx]
     channels = channels[sort_idx]
 
-    grouped_data = []
-    i = 0
-    n = len(entity_ids)
-    while i < n:
-        j = i + 1
-        while (
-            j < n
-            and entity_ids[j] == entity_ids[i]
-            and stage_rank[j] == stage_rank[i]
-            and stage_norm[j] == stage_norm[i]
-        ):
-            j += 1
-        grouped_data.append({
-            "entity": entity_ids[i],
-            "stage_rank": stage_rank[i],
-            "stage_norm": stage_norm[i],
-            "event_dt_ns": event_dt_ns[i],
-            "product_code": product_codes[i],
-            "channel": channels[i],
-        })
-        i = j
+    # Переходы — по журналу событий во времени, а не по рангу этапа.
+    # Сортировка по рангу стирала возвраты: «следующим» всегда оказывался
+    # более поздний этап, и счётчик backward_count оставался нулевым.
+    n_events = len(entity_ids)
+    g_entity = entity_ids
+    g_stage_rank = stage_rank
+    g_stage_norm = stage_norm
+    g_event_dt_ns = event_dt_ns
+    g_product = product_codes
+    g_channel = channels
 
-    grouped_n = len(grouped_data)
-    g_entity = np.array([d["entity"] for d in grouped_data], dtype=object)
-    g_stage_rank = np.array([d["stage_rank"] for d in grouped_data], dtype=int)
-    g_stage_norm = np.array([d["stage_norm"] for d in grouped_data], dtype=object)
-    g_event_dt_ns = np.array([d["event_dt_ns"] for d in grouped_data], dtype="int64")
-    g_product = np.array([d["product_code"] for d in grouped_data], dtype=object)
-    g_channel = np.array([d["channel"] for d in grouped_data], dtype=object)
-
-    next_stage = np.full(grouped_n, "", dtype=object)
-    next_rank = np.full(grouped_n, -1, dtype=int)
-    next_dt_ns = np.full(grouped_n, I_NAT, dtype="int64")
-
-    for i in range(grouped_n - 1):
+    next_stage = np.full(n_events, "", dtype=object)
+    next_rank = np.full(n_events, -1, dtype=int)
+    next_dt_ns = np.full(n_events, I_NAT, dtype="int64")
+    for i in range(n_events - 1):
         if g_entity[i] == g_entity[i + 1]:
             next_stage[i] = g_stage_norm[i + 1]
             next_rank[i] = g_stage_rank[i + 1]
             next_dt_ns[i] = g_event_dt_ns[i + 1]
 
-    valid_transition = (next_dt_ns != I_NAT) & (g_event_dt_ns != I_NAT) & (next_dt_ns >= g_event_dt_ns)
-    # Разрыв между этапами: 1 — смежный переход, больше 1 — пропущен этап,
-    # 0 или меньше — возврат на предыдущий этап (в TAT не идёт).
-    rank_gap = np.full(grouped_n, -1, dtype=int)
     has_next = next_rank >= 0
+    rank_gap = np.zeros(n_events, dtype=int)
     rank_gap[has_next] = next_rank[has_next] - g_stage_rank[has_next]
-    tat_days = np.full(grouped_n, np.nan, dtype="float64")
-    tat_days[valid_transition] = (
-        (next_dt_ns[valid_transition] - g_event_dt_ns[valid_transition]) / 86400_000_000_000.0
-    )
+    tat_days = np.full(n_events, np.nan, dtype="float64")
+    timed = has_next & (next_dt_ns != I_NAT) & (g_event_dt_ns != I_NAT) & (next_dt_ns >= g_event_dt_ns)
+    tat_days[timed] = (next_dt_ns[timed] - g_event_dt_ns[timed]) / 86400_000_000_000.0
 
-    valid_mask = ~np.isnan(tat_days) & (tat_days >= 0)
-    adjacent_mask = valid_mask & (rank_gap == 1)
-    skipped_mask = valid_mask & (rank_gap > 1)
-    backward_mask = valid_mask & (rank_gap <= 0)
+    # gap == 0 — повтор того же этапа, в TAT не идёт и возвратом не считается.
+    adjacent_mask = timed & (rank_gap == 1) & (tat_days >= 0)
+    skipped_mask = timed & (rank_gap > 1) & (tat_days >= 0)
+    backward_mask = has_next & (rank_gap < 0)
     skipped_count = int(skipped_mask.sum())
     backward_count = int(backward_mask.sum())
-
-    if not np.any(adjacent_mask):
-        return {
-            "available": False,
-            "by_transition": pd.DataFrame(),
-            "skipped_transitions": pd.DataFrame(),
-            "skipped_count": skipped_count,
-            "backward_count": backward_count,
-            "by_segment": pd.DataFrame(),
-            "aging_backlog": pd.DataFrame(),
-            "survival_curve": pd.DataFrame(),
-            "assumption": (
-                "Нет ни одного смежного перехода между этапами: в выгрузке "
-                + (f"{skipped_count} переходов с пропущенным этапом. " if skipped_count else "")
-                + "Проверьте журнал событий воронки."
-            ),
-        }
 
     v_transition = g_stage_norm[adjacent_mask] + " -> " + next_stage[adjacent_mask]
     v_from_stage = g_stage_norm[adjacent_mask]
@@ -268,6 +231,16 @@ def funnel_tat(
         )
 
     by_transition_df = pd.DataFrame(transition_rows)
+    if not by_transition_df.empty:
+        by_transition_df["_ord"] = [
+            STAGE_RANK.get(str(name).split(" -> ")[0], 99)
+            for name in by_transition_df["transition"]
+        ]
+        by_transition_df = (
+            by_transition_df.sort_values(["_ord", "transition"])
+            .drop(columns="_ord")
+            .reset_index(drop=True)
+        )
 
     # Переходы с пропущенным этапом («лид → одобрение» без «заявки»): это
     # суммарный охват нескольких этапов, а не время одного этапа, поэтому они
@@ -284,7 +257,7 @@ def funnel_tat(
             skipped_rows.append(
                 {
                     "transition": str(trans_name),
-                    "stages_skipped": int(np.max(s_gap[t_mask])),
+                    "stages_skipped": int(np.max(s_gap[t_mask]) - 1),
                     "count": int(len(vals)),
                     "mean_days": round(float(np.mean(vals)), 2),
                     "median_p50_days": round(float(p50), 2),
@@ -430,9 +403,10 @@ def funnel_tat(
         at_risk = int(np.sum(app_max_rank >= r))
         progressed = int(np.sum(app_max_rank > r))
         dropped_here = at_risk - progressed
+        # Удержание на этапе i — произведение (1 - hazard) по предыдущим этапам,
+        # как в metric-contracts.md. Hazard текущего этапа применяется после записи.
         if r < terminal_rank and at_risk > 0:
             hazard = dropped_here / at_risk
-            survival_prob *= 1.0 - hazard
         else:
             hazard = 0.0
         km_rows.append(
@@ -445,6 +419,8 @@ def funnel_tat(
                 "km_retention_pct": round(float(survival_prob * 100.0), 2),
             }
         )
+        if r < terminal_rank and at_risk > 0:
+            survival_prob *= 1.0 - hazard
     survival_df = pd.DataFrame(km_rows)
 
     ref_dt_str = _ns_to_datetime_str(np.array([ref_dt_ns]))[0] if ref_dt_ns != I_NAT else ""
@@ -460,7 +436,9 @@ def funnel_tat(
         "survival_curve": survival_df,
         "reference_date": ref_dt_str,
         "assumption": (
-            "TAT рассчитан по фактическим датам переходов между соседними этапами STAGE_ORDER. "
+            ("TAT рассчитан по фактическим датам переходов между соседними этапами STAGE_ORDER. "
+             if not by_transition_df.empty
+             else "Смежных переходов между этапами нет, TAT по этапам не рассчитан. ")
             + (f"Пропущено этапов в {skipped_count} переходах — они вынесены в отдельную таблицу "
                "и не участвуют в расчёте SLA. " if skipped_count else "")
             + (f"Ещё {backward_count} переходов возвращают клиента на предыдущий этап — "
@@ -551,7 +529,16 @@ def seasonality_summary(
     if period_length is None:
         if n >= 2:
             median_gap = float(np.median(np.diff(dates_ns).astype(float)) / 86400_000_000_000.0)
-            period_length = 4 if median_gap > 45 else 12
+            if median_gap > 300:
+                period_length = 1
+            elif median_gap > 150:
+                period_length = 2
+            elif median_gap > 45:
+                period_length = 4
+            elif median_gap > 20:
+                period_length = 12
+            else:
+                period_length = 7
         else:
             period_length = 12
 
@@ -620,15 +607,24 @@ def seasonality_summary(
         cycle_pos = _ns_to_month(dates_ns)
     elif period_length == 4:
         cycle_pos = _ns_to_quarter(dates_ns)
+    elif period_length == 2:
+        cycle_pos = np.where(_ns_to_month(dates_ns) <= 6, 1, 2)
     else:
         cycle_pos = (np.arange(n) % period_length) + 1
+
+    # Индексы считаются только по внутренней части центрированного среднего.
+    # Края, где тренд достроен линейной экстраполяцией, в медиану не входят:
+    # иначе сезонный индекс опирается на выдуманный тренд.
+    interior = np.zeros(n, dtype=bool)
+    if n - half > half:
+        interior[half: n - half] = True
 
     if mode_used == "multiplicative":
         safe_trend = np.where(np.abs(trend) < 1e-9, np.mean(y), trend)
         detrended = y / safe_trend
         raw_indices: dict[int, float] = {}
         for pos in range(1, period_length + 1):
-            c_mask = cycle_pos == pos
+            c_mask = (cycle_pos == pos) & interior
             raw_indices[pos] = float(np.median(detrended[c_mask])) if np.any(c_mask) else 1.0
         norm_factor = float(np.mean(list(raw_indices.values()))) or 1.0
         indices = {k: v / norm_factor for k, v in raw_indices.items()}
@@ -639,7 +635,7 @@ def seasonality_summary(
         detrended = y - trend
         raw_indices = {}
         for pos in range(1, period_length + 1):
-            c_mask = cycle_pos == pos
+            c_mask = (cycle_pos == pos) & interior
             raw_indices[pos] = float(np.median(detrended[c_mask])) if np.any(c_mask) else 0.0
         mean_offset = float(np.mean(list(raw_indices.values())))
         indices = {k: v - mean_offset for k, v in raw_indices.items()}

@@ -18,9 +18,10 @@
 
 Только общепринятые термины: LTV, CAC, CPL, ARPU, ARPA, NIM, ROA, ROE, PAR,
 NPL, DPD, ECL, KPI, YoY, QoQ, MoM, TAT, CAGR, ROI, ROMI, COGS, churn,
-retention, TOFU, MOFU, BOFU, ABC, IQR, MAPE, MAE, RMSE, ARIMA, ETS, CSV,
-Excel, JSON, PDF, DOCX, XLSX, PPTX, RTF, HTML, Python, SQL, API, ID, K-means,
-Z-score, B2B, B2C, GitHub, MIT, p-value.
+retention, TOFU, MOFU, BOFU, ABC, IQR, MAPE, MAE, RMSE, MASE, sMAPE, ARIMA,
+ETS, ARX, CSV, Excel, JSON, PDF, DOCX, XLSX, PPTX, RTF, HTML, Python, SQL,
+API, ID, K-means, Z-score, B2B, B2C, GitHub, MIT, p-value, SRM, CUPED, DiD,
+FDR, PVM, RFM, SLA, NRR, HMAC, HC1.
 
 Всё остальное — по-русски или с расшифровкой в скобках при первом упоминании.
 

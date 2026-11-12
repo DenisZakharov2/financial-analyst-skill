@@ -169,7 +169,7 @@ def _compute_metrics(actual: np.ndarray, predicted: np.ndarray, y_insample: np.n
     smape = (
         float(np.mean(2.0 * errors[valid_smape] / denom_smape[valid_smape]) * 100.0)
         if np.any(valid_smape)
-        else 0.0
+        else None
     )
 
     naive_scale = float(np.mean(np.abs(np.diff(y_insample)))) if len(y_insample) > 1 else 0.0
@@ -185,7 +185,7 @@ def _compute_metrics(actual: np.ndarray, predicted: np.ndarray, y_insample: np.n
     return {
         "mae": round(mae, 4),
         "rmse": round(rmse, 4),
-        "smape_pct": round(smape, 2),
+        "smape_pct": round(smape, 2) if smape is not None else None,
         "mase": round(mase, 4) if mase is not None else None,
         "mape_pct": round(mape, 2) if mape is not None else None,
     }
@@ -257,6 +257,9 @@ def forecast_advanced(
     if median_gap > 300:
         freq_offset = pd.DateOffset(years=1)
         seasonal_p = None
+    elif median_gap > 150:
+        freq_offset = pd.DateOffset(months=6)
+        seasonal_p = 2
     elif median_gap > 60:
         freq_offset = pd.DateOffset(months=3)
         seasonal_p = 4
@@ -287,6 +290,12 @@ def forecast_advanced(
 
     folds = min(4, max(1, n // 3))
     start_train = n - folds
+    # Сезонность и ARX на бэктесте должны быть той же моделью, что и финальный
+    # прогноз. Иначе MAE выбирает несезонный ETS, а в отчёт уходит сезонный.
+    if seasonal_p and start_train < 2 * seasonal_p:
+        seasonal_p = None
+    if method == "auto" and "arx" in candidate_methods and start_train < 5:
+        candidate_methods.remove("arx")
 
     def _run_candidate(name: str, train_y: np.ndarray, step_h: int, idx_end: int) -> np.ndarray:
         if name == "ets":
@@ -332,10 +341,14 @@ def forecast_advanced(
     last_dt = pd.Timestamp(dates[-1])
     future_dates = [last_dt + freq_offset * (i + 1) for i in range(horizon)]
 
-    # Интервал расширяется пропорционально sqrt(h): ошибка накопливается с горизонтом.
+    # Интервал расширяется пропорционально sqrt(h): ошибка накапливается с горизонтом.
     pessimistic = [round(float(base_forecast[i] - delta * np.sqrt(i + 1)), 2) for i in range(horizon)]
     baseline = [round(float(base_forecast[i]), 2) for i in range(horizon)]
     optimistic = [round(float(base_forecast[i] + delta * np.sqrt(i + 1)), 2) for i in range(horizon)]
+
+    scipy_note = ""
+    if optimize is None and "ets" in candidate_methods:
+        scipy_note = " scipy не установлен: параметры ETS зафиксированы и не оптимизировались."
 
     return {
         "available": True,
@@ -358,6 +371,8 @@ def forecast_advanced(
         "assumption": (
             f"Модель '{best_method}' выбрана по минимуму MAE ({mae_val:.2f}, "
             f"sMAPE={best_metrics['smape_pct']}%) на скользящем бэктесте ({folds} фолда). "
-            f"Интервал сценариев: ±{band}*MAE*sqrt(h)."
+            f"Интервал сценариев: ±{band}*MAE*sqrt(h). "
+            "RMSE, sMAPE и MASE считаются, но модель по ним не выбирается."
+            f"{scipy_note}"
         ),
     }

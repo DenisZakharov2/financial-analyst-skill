@@ -30,19 +30,21 @@ def _num(df: pd.DataFrame, column: str, default: float = np.nan) -> pd.Series:
 def _months_in_periods(values: pd.Series) -> int:
     """Сколько календарных месяцев покрывает набор периодов.
 
-    Месяц учитывается один раз, квартал — как три месяца, год — как двенадцать.
-    Так ARPU и NIM делят поток на длительность выгрузки, а не на число строк,
-    и «2024-01», «01.2024», «январь 2024», «1к2024» дают одинаковый результат.
+    Месяц входит в объединение один раз: год и лежащие в нём месяцы не
+    складываются. Квартал покрывает три месяца, год — двенадцать.
     """
-    from .core import _period_to_ym
-    spans: dict[str, int] = {}
+    covered: set[str] = set()
     for value in values:
-        ym = _period_to_ym(parse_period(value))
-        if not ym:
+        start, kind = parse_period(value)
+        if pd.isna(start):
             continue
-        kind = parse_period(value)[1]
-        spans[ym] = max(spans.get(ym, 1), PERIOD_MONTHS.get(kind, 1))
-    return int(sum(spans.values()))
+        year, month = int(start.year), int(start.month)
+        for _ in range(PERIOD_MONTHS.get(kind, 1)):
+            covered.add(f"{year:04d}-{month:02d}")
+            month += 1
+            if month == 13:
+                year, month = year + 1, 1
+    return len(covered)
 
 
 def _new_clients(clients: pd.DataFrame | None, finance: pd.DataFrame,
@@ -397,6 +399,9 @@ def unit_economics(
         client_source = "нет данных"
 
     months = max(_months_in_periods(finance["period"]), 1) if "period" in finance.columns else 1
+    if "period" in finance.columns and "product_code" in finance.columns:
+        period_rows, _ = drop_total_rows(finance, group=("period",))
+        months = max(_months_in_periods(period_rows["period"]), 1)
     arpu = revenue / active_clients / months if active_clients else None
     marketing = fin.get("marketing_cost")
     portfolio_base = work_portfolio is not None and "client_id" in work_portfolio.columns
@@ -405,10 +410,10 @@ def unit_economics(
     cac = marketing / cac_base if (marketing is not None and marketing > 0 and cac_base) else None
 
     lifetime = float(lifetime_months)
-    ltv_gross = (arpu * margin_ratio * lifetime) if arpu else None
+    ltv_gross = (arpu * margin_ratio * lifetime) if arpu is not None else None
     ltv_net = (ltv_gross - cac) if (ltv_gross is not None and cac is not None) else None
     ratio = (ltv_gross / cac) if (ltv_gross is not None and cac and ltv_gross > 0 and cac > 0) else None
-    monthly_margin = (arpu * margin_ratio) if arpu else None
+    monthly_margin = (arpu * margin_ratio) if arpu is not None else None
     payback = (cac / monthly_margin) if (cac and monthly_margin and monthly_margin > 0) else None
 
     assumptions = [
@@ -666,7 +671,8 @@ def macro_correlation(left: pd.DataFrame, right: pd.DataFrame,
     if np.std(x) == 0 or np.std(y) == 0:
         return {"n": n, "pearson": None, "spearman": None, "p_value": None}
     pearson = float(np.corrcoef(x, y)[0, 1])
-    # Спирмен = Пирсон по рангам: scipy в зависимостях нет, метод pandas потребовал бы её.
+    # Спирмен — корреляция Пирсона по рангам. pandas.Series.corr её считает
+    # сам и scipy для этого не вызывает.
     spearman = float(pd.Series(x).rank().corr(pd.Series(y).rank()))
     return {
         "n": n,
@@ -685,8 +691,12 @@ def forecast_trend(series: pd.DataFrame, value_col: str = "value",
     для убывающего или отрицательного ряда множитель меняет знак смысла.
     """
     data = series.copy()
-    # Sort by period string (YYYY-MM format sorts correctly)
-    data = data.dropna(subset=[value_col, period_col]).sort_values(period_col)
+    parsed_dates = []
+    for value in data[period_col]:
+        ts, _ = parse_period(value)
+        parsed_dates.append(ts if pd.notna(ts) else pd.NaT)
+    data = data.assign(_dt=parsed_dates)
+    data = data.dropna(subset=[value_col, "_dt"]).sort_values("_dt")
     if len(data) < 6:
         return {"available": False, "reason": "нужно минимум 6 периодов"}
 
@@ -699,12 +709,40 @@ def forecast_trend(series: pd.DataFrame, value_col: str = "value",
     predicted = fit_slope * x[-backtest_n:] + fit_intercept
     actual = y[-backtest_n:]
     mae = float(np.mean(np.abs(actual - predicted)))
-    nonzero = actual != 0
-    mape = float(np.mean(np.abs((actual[nonzero] - predicted[nonzero]) / actual[nonzero])) * 100) if nonzero.any() else None
+    nonzero = np.abs(actual) > 1e-6
+    mape = (
+        float(np.mean(np.abs((actual - predicted) / actual)) * 100)
+        if np.all(nonzero)
+        else None
+    )
 
-    last_period = data[period_col].iloc[-1]
-    step_months = _infer_step_months(data[period_col])
-    future = [_add_months_to_ym(last_period, step_months * (i + 1)) for i in range(horizon)]
+    last_dt = pd.Timestamp(data["_dt"].iloc[-1])
+    # Шаг считаем по уже разобранным датам. _infer_step_months смотрит только
+    # на YYYY-MM и схлопывает «2024-01-02»…«2024-01-10» в один месяц (шаг 0),
+    # после чего `or 30` подставляет месячный горизонт.
+    gaps = np.diff(data["_dt"].to_numpy()).astype("timedelta64[D]").astype(float)
+    day_step = float(np.median(gaps)) if len(gaps) else 30.0
+    if day_step >= 300:
+        step_months = 12
+    elif day_step >= 170:
+        step_months = 6
+    elif day_step >= 80:
+        step_months = 3
+    elif day_step >= 27:
+        step_months = 1
+    else:
+        step_months = 0
+    if step_months > 0:
+        future = [
+            _add_months_to_ym(last_dt.strftime("%Y-%m"), step_months * (i + 1))
+            for i in range(horizon)
+        ]
+    else:
+        step_days = int(max(1, round(day_step))) if len(gaps) else 1
+        future = [
+            (last_dt + pd.Timedelta(days=step_days * (i + 1))).strftime("%Y-%m-%d")
+            for i in range(horizon)
+        ]
     base = np.polyval([slope, intercept], np.arange(len(y), len(y) + horizon, dtype=float))
     delta = band * mae
     assumption = ("Линейный тренд по истории; границы сценариев = базовая линия ± "

@@ -103,7 +103,7 @@ def load_tables(data_dir: Path, skip_patterns: tuple[str, ...] = ()) -> dict[str
             continue
         if any(path.stem.startswith(pattern) for pattern in skip_patterns):
             continue
-        name = path.stem
+        name = path.stem.strip().lower().replace("ё", "е")
         try:
             if path.suffix.lower() == ".csv":
                 tables[name] = _read_csv_flexible(path)
@@ -141,6 +141,23 @@ MONTHS_RU = {
     "ноябр": 11, "ноя": 11,
     "декабр": 12, "дек": 12,
 }
+
+
+def _month_from_stem(stem: str) -> int | None:
+    """Месяц по русской основе. «маржа» не является мартом: хвост после основы
+    должен быть пустым или обычным падежным окончанием.
+    """
+    endings = ("", "ь", "я", "е", "ю", "ем", "ём", "а", "у")
+    best: tuple[int, int] | None = None
+    for key, month in MONTHS_RU.items():
+        if not stem.startswith(key):
+            continue
+        tail = stem[len(key):]
+        if tail not in endings:
+            continue
+        if best is None or len(key) > best[0]:
+            best = (len(key), month)
+    return None if best is None else best[1]
 
 
 def _timestamp(year, month=1, day=1) -> pd.Timestamp | pd.NaT:
@@ -198,6 +215,8 @@ def parse_period(value) -> tuple[pd.Timestamp | pd.NaT, str]:
         return _typed(_timestamp(value.year, value.month, day), kind)
 
     text = str(value).strip().lower().replace("ё", "е")
+    if re.fullmatch(r"\d{4}\.0+", text):
+        text = text.split(".", 1)[0]
     if not text:
         return pd.NaT, ""
 
@@ -209,7 +228,10 @@ def parse_period(value) -> tuple[pd.Timestamp | pd.NaT, str]:
         # так «2024-05-01» и Timestamp("2024-05-01") трактуются одинаково.
         return _typed(_timestamp(int(match[1]), int(match[2]), day), "D" if day != 1 else "M")
 
-    match = re.fullmatch(r"(\d{2})[\./](\d{2})[\./](\d{4})", text)
+    match = re.fullmatch(
+        r"(\d{1,2})[\./](\d{1,2})[\./](\d{4})(?:[t\s]\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?)?",
+        text,
+    )
     if match:
         day = int(match[1])
         return _typed(_timestamp(int(match[3]), int(match[2]), day), "D" if day != 1 else "M")
@@ -222,7 +244,7 @@ def parse_period(value) -> tuple[pd.Timestamp | pd.NaT, str]:
     if match:
         return _typed(_timestamp(int(match[2]), int(match[1]), 1), "M")
 
-    match = re.fullmatch(r"(\d)\s*[кk][вb]?\s*(\d{2,4})", text)
+    match = re.fullmatch(r"(\d)\s*[кk][вb]?\.?\s*(\d{2,4})", text)
     if match:
         quarter, year = int(match[1]), int(match[2])
         year = year + 2000 if year < 100 else year
@@ -236,14 +258,14 @@ def parse_period(value) -> tuple[pd.Timestamp | pd.NaT, str]:
     match = re.fullmatch(r"([а-я]+)\s*(\d{4})", text)
     if match:
         stem, year = match[1], int(match[2])
-        month = next((num for key, num in MONTHS_RU.items() if stem.startswith(key)), None)
+        month = _month_from_stem(stem)
         if month:
             return _typed(_timestamp(year, month, 1), "M")
 
     match = re.fullmatch(r"(\d{4})\s*[-/]\s*([а-я]+)", text)
     if match:
         year, stem = int(match[1]), match[2]
-        month = next((num for key, num in MONTHS_RU.items() if stem.startswith(key)), None)
+        month = _month_from_stem(stem)
         if month:
             return _typed(_timestamp(year, month, 1), "M")
 

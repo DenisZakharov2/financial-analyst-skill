@@ -620,6 +620,8 @@ def write_xlsx(report: ReportData, path: Path) -> Path:
                     value = float(value)
                 if isinstance(value, float) and np.isnan(value):
                     value = None
+                elif isinstance(value, str) and value[:1] in ("=", "+", "-", "@"):
+                    value = "'" + value
                 cell = ws.cell(row=i, column=j, value=value)
                 if isinstance(value, float):
                     cell.number_format = "# ##0.00"
@@ -844,6 +846,8 @@ ALLOWED_LATIN = {
     "rmse", "arima", "ets", "csv", "excel", "json", "pdf", "docx", "xlsx",
     "pptx", "rtf", "html", "python", "sql", "github", "mit", "api", "id",
     "k-means", "z-score", "b2b", "b2c", "p-value",
+    "srm", "cuped", "did", "fdr", "pvm", "rfm", "mase", "smape", "arx",
+    "hmac", "hc1", "cli", "sla", "nrr",
     # Финансовые и валютные аббревиатуры
     "rub", "usd", "eur", "opex", "capex", "ebitda", "pd", "lgd", "ead",
     "stage", "plotly", "all", "null", "nan", "nrr", "sla", "p50", "p75", "p90", "p95", "km",

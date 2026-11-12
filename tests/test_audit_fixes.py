@@ -7,9 +7,9 @@
 import numpy as np
 import pandas as pd
 import pytest
-from finanalyst import pii
+from finanalyst import experiments, pii
 from finanalyst.adapters import cbr_survey, client_csv
-from finanalyst.comparison import compare_snapshots
+from finanalyst.comparison import compare_snapshots, portfolio_bridge
 from finanalyst.core import (
     KNOWN_TABLES,
     TOTAL_CODES,
@@ -23,6 +23,7 @@ from finanalyst.core import (
     period_ym,
     validate_inputs,
 )
+from finanalyst.metrics import forecast_trend
 from finanalyst.seasonality_tat import funnel_tat
 
 # ---------------------------------------------------------------------------
@@ -359,3 +360,171 @@ def test_report_with_missing_chart_is_still_written(tmp_path):
     )
     path = write_pdf(report, tmp_path / "report.pdf")
     assert path.exists() and path.stat().st_size > 0
+
+
+# ---------------------------------------------------------------------------
+# Ревизия 2.1.1: формулы, которые расходились с контрактом
+# ---------------------------------------------------------------------------
+
+def test_km_retention_is_recorded_before_current_hazard():
+    """Первый этап воронки удерживает 100 %, даже если часть заявок на нём отваливается."""
+    events = pd.DataFrame({
+        "application_id": ["A1", "A1", "A2"],
+        "stage": ["лид", "обращение", "лид"],
+        "event_date": ["2024-01-01", "2024-01-03", "2024-01-01"],
+    })
+    curve = funnel_tat(events)["survival_curve"].set_index("stage")
+    assert curve.loc["лид", "km_retention_pct"] == 100.0
+    assert curve.loc["лид", "stage_hazard_pct"] == 50.0
+    assert curve.loc["обращение", "km_retention_pct"] == 50.0
+
+
+def test_return_to_earlier_stage_increments_backward_count():
+    """Возврат — это более поздняя дата и более ранний этап, а не перепутанный порядок строк."""
+    events = pd.DataFrame({
+        "application_id": ["A1", "A1", "A1"],
+        "stage": ["лид", "обращение", "лид"],
+        "event_date": ["2024-01-01", "2024-01-02", "2024-01-05"],
+    })
+    result = funnel_tat(events)
+    assert result["backward_count"] == 1
+    transitions = set(result["by_transition"]["transition"])
+    assert "лид -> обращение" in transitions
+    assert "обращение -> лид" not in transitions
+
+
+def test_forecast_daily_horizon_does_not_collapse_onto_one_date():
+    dates = pd.date_range("2024-01-01", periods=10, freq="D").strftime("%Y-%m-%d")
+    series = pd.DataFrame({"period_start": list(dates), "value": np.arange(1, 11, dtype=float)})
+    result = forecast_trend(series, horizon=4)
+    assert result["available"] is True
+    assert result["periods"] == ["2024-01-11", "2024-01-12", "2024-01-13", "2024-01-14"]
+
+
+def test_forecast_mape_is_null_when_backtest_actual_is_zero():
+    series = pd.DataFrame({
+        "period_start": ["2024-01", "2024-02", "2024-03", "2024-04",
+                         "2024-05", "2024-06", "2024-07", "2024-08"],
+        "value": [10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 0.0, 24.0],
+    })
+    result = forecast_trend(series, horizon=2)
+    assert result["available"] is True
+    assert result["mape_pct"] is None
+
+
+def test_zero_opening_book_does_not_report_zero_nrr():
+    base = pd.DataFrame({"client_id": ["C1"], "balance": [0.0]})
+    target = pd.DataFrame({"client_id": ["C2"], "balance": [100.0]})
+    result = portfolio_bridge(base, target)
+    assert result["net_dollar_retention_pct"] is None
+    assert result["balance_growth_pct"] is None
+    assert result["client_retention_pct"] is None
+    assert result["bridge_table"]["contribution_to_growth_pct"].isna().all()
+
+
+def test_lower_is_better_flips_positive_ab_effect_to_stop():
+    rng = np.random.default_rng(7)
+    n_clients = 200
+    groups = ["control"] * n_clients + ["treatment"] * n_clients
+    values = np.concatenate([
+        rng.normal(100.0, 10.0, size=n_clients),
+        rng.normal(112.0, 10.0, size=n_clients),
+    ])
+    frame = pd.DataFrame({
+        "client_id": [f"C-{i}" for i in range(n_clients * 2)],
+        "experiment_group": groups,
+        "value": values,
+    })
+    better = experiments.run_ab_test(frame, higher_is_better=True)
+    worse = experiments.run_ab_test(frame, higher_is_better=False)
+    assert better["recommendation"] == "launch"
+    assert worse["recommendation"] == "stop_degradation"
+    assert "меньше лучше" in worse["assumption"]
+
+
+def test_proportion_ci_stays_inside_unit_interval_when_wald_does_not():
+    """9/10 против 1/10: интервал Вальда вылезает за 1, Ньюкомб — нет."""
+    rows = []
+    for i in range(10):
+        rows.append({"client_id": f"C-{i}", "experiment_group": "control", "value": 1.0 if i == 0 else 0.0})
+    for i in range(10):
+        rows.append({"client_id": f"T-{i}", "experiment_group": "treatment", "value": 0.0 if i == 0 else 1.0})
+    result = experiments.run_ab_test(pd.DataFrame(rows), metric_type="proportion")
+    low, high = result["ci_95"]
+    assert result["test_used"] == "two_proportion_z_test"
+    assert -1.0 <= low <= high <= 1.0
+    assert abs(result["absolute_effect"] - 0.8) < 1e-9
+
+
+def test_year_and_months_do_not_double_count_the_window():
+    from finanalyst.metrics import _months_in_periods
+
+    periods = ["2024"] + [f"2024-{month:02d}" for month in range(1, 13)]
+    assert _months_in_periods(pd.Series(periods)) == 12
+
+
+def test_pvm_ignores_total_row():
+    from finanalyst import drivers
+
+    base = pd.DataFrame({
+        "product_code": ["A", "B", "ALL"],
+        "volume": [100.0, 100.0, 200.0],
+        "revenue": [10.0, 30.0, 40.0],
+    })
+    target = base.copy()
+    target["revenue"] = [10.0, 30.0, 80.0]
+    result = drivers.pvm_decomposition(base, target)
+    assert result["available"] is True
+    assert abs(result["total_delta"]) < 0.01
+    assert "ALL" not in set(result["by_segment"]["product_code"])
+
+
+def test_skipped_stage_count_is_the_number_of_missing_stages():
+    events = pd.DataFrame({
+        "application_id": ["A1", "A1"],
+        "stage": ["лид", "заявка"],
+        "event_date": ["2024-01-01", "2024-01-04"],
+    })
+    skipped = funnel_tat(events)["skipped_transitions"]
+    assert skipped.iloc[0]["transition"] == "лид -> заявка"
+    assert skipped.iloc[0]["stages_skipped"] == 1
+
+
+def test_bridge_keeps_negative_balances():
+    base = pd.DataFrame({"client_id": ["C1", "C2"], "balance": [100.0, -50.0]})
+    target = pd.DataFrame({"client_id": ["C1", "C2"], "balance": [80.0, -40.0]})
+    result = portfolio_bridge(base, target)
+    assert result["balance_base"] == 50.0
+    assert result["balance_target"] == 40.0
+    assert result["balance_delta"] == -10.0
+
+
+def test_margin_word_is_not_parsed_as_march():
+    ts, kind = parse_period("маржа 2024")
+    assert pd.isna(ts) and kind == ""
+    march, march_kind = parse_period("март 2024")
+    assert march_kind == "M" and march.month == 3
+    stamped, stamped_kind = parse_period("15.05.2024 13:45:00")
+    assert stamped_kind == "D" and stamped.day == 15 and stamped.month == 5
+
+
+def test_hmac_int_and_float_ids_match():
+    left = pii._hmac_token(1, b"secret", "CL")
+    right = pii._hmac_token(1.0, b"secret", "CL")
+    assert left == right
+    assert len(left.split("-", 1)[1]) == 16
+
+
+def test_product_name_is_not_treated_as_fio():
+    products = pd.DataFrame({
+        "product_name": ["Карта Зарплатная Базовая", "Кредит Наличный Стандарт", "Вклад Срочный Премиум"],
+    })
+    assert pii.scan_pii({"products": products}) == []
+
+
+def test_numeric_phone_column_is_detected():
+    clients = pd.DataFrame({"msisdn": [79001234567, 79007654321, 79161112233]})
+    findings = pii.scan_pii({"clients": clients})
+    assert findings and findings[0].pii_type == "phone_ru"
+
+

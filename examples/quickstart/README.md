@@ -42,6 +42,7 @@ charts/funnel.png
 Ожидаемый вывод `--strict`:
 
 ```
-Контроль качества: 18 проверок, 0 fail, 0 warn
+Контроль качества: 14 проверок, 0 fail, 1 warn
+  [warn] min_series_length_for_seasonality: Периодов в finance: 6; для сезонных индексов нужно 24 месяца
 Готово: ...
 ```

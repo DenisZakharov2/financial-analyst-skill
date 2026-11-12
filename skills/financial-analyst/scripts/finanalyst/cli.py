@@ -26,6 +26,7 @@ from .core import (
     load_tables,
     normalize_periods,
     period_labels,
+    period_ym,
     validate_inputs,
 )
 from .drivers import macro_lead_lag, par_shift_decomposition, pvm_decomposition
@@ -94,6 +95,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Доэкспериментальная ковариата для CUPED")
     parser.add_argument("--ab-group-col", default="experiment_group",
                         help="Колонка групп пилота (control / treatment)")
+    parser.add_argument("--ab-lower-is-better", action="store_true",
+                        help="Метрика A/B-теста, где меньшее значение лучше "
+                             "(PAR, срок, расходы). По умолчанию большее — лучше")
     parser.add_argument("--segment", action="store_true",
                         help="Сегментация клиентов: матрица RFM + Risk и кластеризация")
     parser.add_argument("--no-cluster", action="store_true",
@@ -454,6 +458,11 @@ def run(args: argparse.Namespace) -> int:
                 f"PII: режим={pii_mode}, удалены колонки={pii_report['findings']}, "
                 f"псевдонимизированы ключи={pii_report['pseudonymized_columns']}"
             )
+            if pii_report.get("key_ephemeral"):
+                notes.append(
+                    "PII: ключ HMAC сгенерирован на один запуск. Задайте FINANALYST_PII_KEY, "
+                    "чтобы псевдонимы совпадали между запусками."
+                )
         else:
             notes.append("PII: прямых ПДн не обнаружено")
 
@@ -501,6 +510,7 @@ def run(args: argparse.Namespace) -> int:
                     denominator_col=getattr(args, "ab_denominator", None),
                     pre_metric_col=getattr(args, "ab_pre_metric", None),
                     metric_type=getattr(args, "ab_metric_type", "continuous"),
+                    higher_is_better=not getattr(args, "ab_lower_is_better", False),
                 )
 
     quality = validate_inputs(tables)
@@ -653,10 +663,11 @@ def run(args: argparse.Namespace) -> int:
         if date_col is not None:
             funnel_ts = funnel_source[[date_col]].copy()
             # Приводим даты событий к началу месяца (YYYY-MM-01) и считаем поток событий
-            funnel_ts["period"] = [
-                f"{str(v).strip()[:7]}-01" if pd.notna(v) and len(str(v).strip()) >= 7 else ""
-                for v in funnel_ts[date_col]
-            ]
+            funnel_periods = []
+            for value in funnel_ts[date_col]:
+                ym = period_ym(value) if pd.notna(value) else ""
+                funnel_periods.append(f"{ym}-01" if ym else "")
+            funnel_ts["period"] = funnel_periods
             funnel_ts["events_count"] = 1.0
             season_result = seasonality_summary(funnel_ts, value_col="events_count", period_col="period")
             if season_result.get("available"):
@@ -1002,9 +1013,13 @@ def run(args: argparse.Namespace) -> int:
                              comparison["assumption"]))
             bridge = comparison["portfolio_bridge"]
             if bridge.get("available"):
+                def _pct(value: object) -> str:
+                    return "—" if value is None else f"{float(value):.2f}%"
+
                 sections.append(("Сравнение: портфельный Bridge", bridge["bridge_table"],
-                                 f"Δ портфель: {bridge['balance_delta']:,.2f} ({bridge['balance_growth_pct']:.2f}%), "
-                                 f"Retention: {bridge['client_retention_pct']:.2f}%, NRR: {bridge['net_dollar_retention_pct']:.2f}%"))
+                                 f"Δ портфель: {bridge['balance_delta']:,.2f} ({_pct(bridge['balance_growth_pct'])}), "
+                                 f"Retention: {_pct(bridge['client_retention_pct'])}, "
+                                 f"NRR: {_pct(bridge['net_dollar_retention_pct'])}"))
                 headline.append(headline_row(
                     f"Δ Портфель ({label_base}→{label_target})", bridge["balance_delta"], "руб.",
                     "portfolio", digits=0

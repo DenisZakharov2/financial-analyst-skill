@@ -15,12 +15,14 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from .core import drop_total_rows, parse_period
+
 try:
     from scipy import stats
 except ImportError:  # pragma: no cover - зависит от окружения
     stats = None
 
-SCIPY_REQUIRED = "Для лагового теста Грейнджера нужен scipy: pip install 'financial-analyst-skill[analysis]'."
+SCIPY_REQUIRED = "Для лагового теста Грейнджера нужен scipy (он указан в requirements.txt)."
 
 
 def pvm_decomposition(
@@ -50,6 +52,15 @@ def pvm_decomposition(
                     "by_segment": pd.DataFrame(),
                     "assumption": f"В {label} выборке нет колонки «{column}».",
                 }
+
+    df_base, _ = drop_total_rows(df_base, group=())
+    df_target, _ = drop_total_rows(df_target, group=())
+    if df_base.empty or df_target.empty:
+        return {
+            "available": False,
+            "by_segment": pd.DataFrame(),
+            "assumption": "После исключения итоговых строк ALL не осталось продуктов для PVM.",
+        }
 
     base = df_base.groupby(segment_col, as_index=False).agg(
         q0=(volume_col, "sum"),
@@ -137,7 +148,8 @@ def par_shift_decomposition(
             }
 
     def _prep(frame: pd.DataFrame) -> pd.DataFrame:
-        tmp = frame.copy()
+        tmp, _ = drop_total_rows(frame, group=())
+        tmp = tmp.copy()
         tmp["bal"] = pd.to_numeric(tmp["balance"], errors="coerce").fillna(0.0)
         tmp["dpd_num"] = pd.to_numeric(tmp["dpd"], errors="coerce").fillna(0.0)
         tmp["par_bal"] = np.where(tmp["dpd_num"] >= dpd_threshold, tmp["bal"], 0.0)
@@ -283,9 +295,10 @@ def macro_lead_lag(
 
     tmp = series_df.copy()
     tmp["_val"] = pd.to_numeric(tmp[value_col], errors="coerce")
-    tmp = tmp.dropna(subset=["_val", indicator_col])
+    tmp["_dt"] = [parse_period(value)[0] for value in tmp[period_col]]
+    tmp = tmp.dropna(subset=["_val", "_dt", indicator_col])
 
-    pivot = (tmp.pivot_table(index=period_col, columns=indicator_col, values="_val", aggfunc="mean")
+    pivot = (tmp.pivot_table(index="_dt", columns=indicator_col, values="_val", aggfunc="mean")
                .sort_index())
     pivot = pivot.dropna(axis=1, how="all").dropna(axis=0, how="any")
 
@@ -318,14 +331,23 @@ def macro_lead_lag(
             best_p = 1.0
             best_f = 0.0
             best_corr = 0.0
+            lags_tried = 0
             for lag in range(1, safe_max_lag + 1):
                 f_stat, p_val = _granger_f_test(x, y, lag)
-                corr = float(np.corrcoef(x[:-lag], y[lag:])[0, 1])
+                lags_tried += 1
+                x_slice, y_slice = x[:-lag], y[lag:]
+                if np.std(x_slice) < 1e-12 or np.std(y_slice) < 1e-12:
+                    corr = 0.0
+                else:
+                    corr = float(np.corrcoef(x_slice, y_slice)[0, 1])
                 if p_val <= best_p:
                     best_p = p_val
                     best_f = f_stat
                     best_lag = lag
                     best_corr = corr
+            # Минимум p-value по лагам занижает значимость. Бонферрони по числу
+            # проверенных лагов ставится до FDR по парам показателей.
+            search_p = min(1.0, best_p * max(lags_tried, 1))
             raw_rows.append(
                 {
                     "cause_indicator": str(cause),
@@ -333,7 +355,7 @@ def macro_lead_lag(
                     "best_lag": int(best_lag),
                     "lag_corr": round(best_corr, 4),
                     "granger_f": round(best_f, 4),
-                    "p_value_raw": round(best_p, 5),
+                    "p_value_raw": round(search_p, 5),
                 }
             )
 
@@ -358,7 +380,7 @@ def macro_lead_lag(
         "assumption": (
             f"Лаговый анализ Грейнджера выполнен на "
             f"{'первых разностях' if differencing else 'уровнях'} (T={eff_t}, max_lag={safe_max_lag}) "
-            f"с поправкой Бенджамини — Хохберга (FDR < {alpha}). Отражает прогностическое "
-            "опережение, а не изолированную интервенцию."
+            f"с поправкой Бонферрони по перебранным лагам и Бенджамини — Хохберга по парам "
+            f"(FDR < {alpha}). Отражает прогностическое опережение, а не изолированную интервенцию."
         ),
     }

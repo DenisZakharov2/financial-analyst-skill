@@ -525,7 +525,7 @@ def build_dashboard(survey: pd.DataFrame, indicator: str, path: Path,
 
     safe_title = html.escape(title)
     safe_indicator = html.escape(indicator)
-    safe_data = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
+    safe_data = json.dumps(payload, ensure_ascii=False).replace("<", "\\u003c").replace("</", "<\\/")
 
     import datetime as dt
     html_out = (DASHBOARD_TEMPLATE

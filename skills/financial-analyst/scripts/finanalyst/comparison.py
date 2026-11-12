@@ -73,8 +73,8 @@ def portfolio_bridge(
 
     b_agg = b.groupby(entity_col, as_index=False)["bal_0"].sum()
     t_agg = t.groupby(entity_col, as_index=False)["bal_1"].sum()
-    b_agg = b_agg[b_agg["bal_0"] > 0]
-    t_agg = t_agg[t_agg["bal_1"] > 0]
+    b_agg = b_agg[b_agg["bal_0"] != 0]
+    t_agg = t_agg[t_agg["bal_1"] != 0]
 
     merged = pd.merge(b_agg, t_agg, on=entity_col, how="outer", indicator=True)
     merged["bal_0"] = merged["bal_0"].fillna(0.0)
@@ -109,26 +109,27 @@ def portfolio_bridge(
                 "balance_target": round(float(sub["bal_1"].sum()), 2),
                 "balance_delta": round(float(sub["delta"].sum()), 2),
                 "contribution_to_growth_pct": (
-                    round(float(sub["delta"].sum()) / total_0 * 100.0, 2) if total_0 > 0 else 0.0
+                    round(float(sub["delta"].sum()) / total_0 * 100.0, 2) if total_0 > 0 else None
                 ),
             }
         )
 
     retained_count = int((merged["_merge"] == "both").sum())
     base_count = int(len(b_agg))
-    retention_rate_pct = round(retained_count / base_count * 100.0, 2) if base_count > 0 else 0.0
+    retention_rate_pct = round(retained_count / base_count * 100.0, 2) if base_count > 0 else None
     nrr_pct = (
         round(float(merged[merged["_merge"] == "both"]["bal_1"].sum()) / total_0 * 100.0, 2)
         if total_0 > 0
-        else 0.0
+        else None
     )
+    growth_pct = round(total_delta / total_0 * 100.0, 2) if total_0 > 0 else None
 
     return {
         "available": True,
         "balance_base": round(total_0, 2),
         "balance_target": round(total_1, 2),
         "balance_delta": round(total_delta, 2),
-        "balance_growth_pct": round(total_delta / total_0 * 100.0, 2) if total_0 > 0 else 0.0,
+        "balance_growth_pct": growth_pct,
         "client_retention_pct": retention_rate_pct,
         "net_dollar_retention_pct": nrr_pct,
         "bridge_table": pd.DataFrame(rows),

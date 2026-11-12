@@ -22,12 +22,14 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
+from .core import parse_period
+
 try:
     from scipy import stats
 except ImportError:  # pragma: no cover - зависит от окружения
     stats = None
 
-SCIPY_REQUIRED = "Для статистических тестов нужен scipy: pip install 'financial-analyst-skill[analysis]'."
+SCIPY_REQUIRED = "Для статистических тестов нужен scipy (он указан в requirements.txt)."
 
 RECOMMENDATIONS = {
     "launch": "Запустить",
@@ -73,6 +75,69 @@ def check_srm(
     }
 
 
+def _wilson_bounds(successes: float, n: int, z: float) -> tuple[float, float]:
+    """Интервал Уилсона для доли."""
+    if n <= 0:
+        return 0.0, 0.0
+    p_hat = successes / n
+    z2 = z * z
+    denom = 1.0 + z2 / n
+    center = (p_hat + z2 / (2.0 * n)) / denom
+    half = z * float(np.sqrt(p_hat * (1.0 - p_hat) / n + z2 / (4.0 * n * n))) / denom
+    return max(0.0, center - half), min(1.0, center + half)
+
+
+def _newcombe_diff_ci(
+    succ_c: float, n_c: int, succ_t: float, n_t: int, z: float,
+) -> tuple[float, float]:
+    """Интервал Ньюкомба для разности долей (Wilson score method 10).
+
+    Нижняя граница использует нижнее плечо treatment и верхнее плечо control;
+    границы обрезаются до [-1, 1], потому что разность долей не бывает шире.
+    """
+    p_c = succ_c / n_c
+    p_t = succ_t / n_t
+    diff = p_t - p_c
+    l_c, u_c = _wilson_bounds(succ_c, n_c, z)
+    l_t, u_t = _wilson_bounds(succ_t, n_t, z)
+    lower = diff - float(np.sqrt((p_t - l_t) ** 2 + (u_c - p_c) ** 2))
+    upper = diff + float(np.sqrt((u_t - p_t) ** 2 + (p_c - l_c) ** 2))
+    return max(-1.0, lower), min(1.0, upper)
+
+
+def _welch_crit(left: np.ndarray, right: np.ndarray, alpha: float) -> float:
+    """Критическое значение t Уэлча — Саттертуэйта для доверительного интервала.
+
+    p-value считается тем же t-тестом. Нормальный z на малых группах уже
+    интервала, чем критическое t, и расходится с решением «значимо / нет».
+    """
+    n_left, n_right = len(left), len(right)
+    var_left = float(np.var(left, ddof=1)) if n_left > 1 else 0.0
+    var_right = float(np.var(right, ddof=1)) if n_right > 1 else 0.0
+    se_num = var_left / max(n_left, 1) + var_right / max(n_right, 1)
+    denom = 0.0
+    if n_left > 1:
+        denom += (var_left / n_left) ** 2 / (n_left - 1)
+    if n_right > 1:
+        denom += (var_right / n_right) ** 2 / (n_right - 1)
+    if se_num <= 0 or denom <= 0:
+        df_w = float(max(n_left + n_right - 2, 1))
+    else:
+        df_w = se_num ** 2 / denom
+    if not np.isfinite(df_w) or df_w <= 0:
+        df_w = float(max(n_left + n_right - 2, 1))
+    return float(stats.t.ppf(1.0 - alpha / 2.0, df_w))
+
+
+def _coerce_timestamp(value) -> pd.Timestamp:
+    """Разобрать период тем же парсером, что и остальной пакет, с фолбэком pandas."""
+    ts, _ = parse_period(value)
+    if pd.notna(ts):
+        return pd.Timestamp(ts)
+    parsed = pd.to_datetime(value, errors="coerce")
+    return pd.Timestamp(parsed) if pd.notna(parsed) else pd.NaT
+
+
 def apply_cuped(
     y_control: np.ndarray,
     y_treatment: np.ndarray,
@@ -108,12 +173,14 @@ def run_ab_test(
     expected_treatment_share: float = 0.5,
     alpha: float = 0.05,
     power: float = 0.80,
+    higher_is_better: bool = True,
 ) -> dict:
     """Провести анализ A/B-теста с проверкой SRM и учётом кластеризации на клиенте.
 
     Типы метрик:
     - ``continuous`` — t-тест Уэлча и U-тест Манна — Уитни, опционально CUPED;
-    - ``proportion`` — z-тест пропорций с доверительным интервалом Ньюкомба — Уилсона;
+    - ``proportion`` — z-тест пропорций; доверительный интервал разности — метод Ньюкомба
+      на интервалах Уилсона, а не Вальд;
     - ``ratio`` — линеаризация Дельта-метода на уровне единицы рандомизации.
     """
     if df is None or df.empty or group_col not in df.columns or metric_col not in df.columns:
@@ -134,12 +201,16 @@ def run_ab_test(
             ),
         }
 
-    work["_num"] = pd.to_numeric(work[metric_col], errors="coerce").fillna(0.0)
+    work["_num"] = pd.to_numeric(work[metric_col], errors="coerce")
+    before = len(work)
+    work = work.dropna(subset=["_num"])
+    dropped_metric = before - len(work)
     has_denom = denominator_col is not None and denominator_col in work.columns
-    work["_den"] = (
-        pd.to_numeric(work[denominator_col], errors="coerce").fillna(0.0)
-        if has_denom else 1.0
-    )
+    if has_denom:
+        work["_den"] = pd.to_numeric(work[denominator_col], errors="coerce")
+        work = work.dropna(subset=["_den"])
+    else:
+        work["_den"] = 1.0
     has_pre = pre_metric_col is not None and pre_metric_col in work.columns
     work["_pre"] = (
         pd.to_numeric(work[pre_metric_col], errors="coerce").fillna(0.0)
@@ -190,10 +261,9 @@ def run_ab_test(
         diff = p_t - p_c
         p_pool = (succ_c + succ_t) / (n_c + n_t)
         se_pool = float(np.sqrt(max(1e-15, p_pool * (1.0 - p_pool) * (1.0 / n_c + 1.0 / n_t))))
-        se_unpool = float(np.sqrt(max(1e-15, p_c * (1.0 - p_c) / n_c + p_t * (1.0 - p_t) / n_t)))
         z_stat = diff / se_pool
         p_val = float(2.0 * (1.0 - stats.norm.cdf(abs(z_stat))))
-        ci_low, ci_high = diff - z_alpha * se_unpool, diff + z_alpha * se_unpool
+        ci_low, ci_high = _newcombe_diff_ci(succ_c, n_c, succ_t, n_t, z_alpha)
         mde_abs = (z_alpha + z_beta) * se_pool
         rel_uplift_pct = (diff / p_c * 100.0) if p_c > 1e-12 else 0.0
         test_used = "two_proportion_z_test"
@@ -224,7 +294,8 @@ def run_ab_test(
         t_res = stats.ttest_ind(lin_t, lin_c, equal_var=False)
         p_val = float(t_res.pvalue)
         se_diff = float(np.sqrt(np.var(lin_c, ddof=1) / n_c + np.var(lin_t, ddof=1) / n_t))
-        ci_low, ci_high = diff - z_alpha * se_diff, diff + z_alpha * se_diff
+        t_crit = _welch_crit(lin_c, lin_t, alpha)
+        ci_low, ci_high = diff - t_crit * se_diff, diff + t_crit * se_diff
         mde_abs = (z_alpha + z_beta) * se_diff
         rel_uplift_pct = (diff / abs(r_c) * 100.0) if abs(r_c) > 1e-12 else 0.0
         p_c, p_t = r_c, r_t
@@ -256,17 +327,20 @@ def run_ab_test(
         mwu_p = round(float(mwu_res.pvalue), 6)
 
         se_diff = float(np.sqrt(np.var(y_c, ddof=1) / n_c + np.var(y_t, ddof=1) / n_t))
-        ci_low, ci_high = diff - z_alpha * se_diff, diff + z_alpha * se_diff
+        t_crit = _welch_crit(y_c, y_t, alpha)
+        ci_low, ci_high = diff - t_crit * se_diff, diff + t_crit * se_diff
         mde_abs = (z_alpha + z_beta) * se_diff
         rel_uplift_pct = (diff / abs(p_c) * 100.0) if abs(p_c) > 1e-12 else 0.0
 
+    improved = diff > 0 if higher_is_better else diff < 0
+    worsened = diff < 0 if higher_is_better else diff > 0
     if overlap_count:
         decision = "invalid_assignment_overlap"
     elif not srm_info["srm_ok"]:
         decision = "invalid_srm_detected"
-    elif p_val < alpha and diff > 0:
+    elif p_val < alpha and improved:
         decision = "launch"
-    elif p_val < alpha and diff < 0:
+    elif p_val < alpha and worsened:
         decision = "stop_degradation"
     else:
         decision = "inconclusive_or_neutral"
@@ -291,7 +365,14 @@ def run_ab_test(
         "recommendation_text": RECOMMENDATIONS.get(decision, decision),
         "assumption": (
             f"A/B-тест рассчитан методом '{test_used}' на уровне единицы рандомизации "
-            f"({entity_col or 'строка'}). SRM хи-квадрат p={srm_info['p_value']}."
+            f"({entity_col or 'строка'}). SRM хи-квадрат p={srm_info['p_value']}. "
+            f"Направление метрики: {'больше лучше' if higher_is_better else 'меньше лучше'}."
+            + (f" Пропуски метрики исключены ({dropped_metric} строк), а не заменены нулём."
+               if dropped_metric else "")
+            + (
+                " U-тест Манна — Уитни посчитан по исходной метрике, не по остаткам CUPED."
+                if cuped_theta is not None else ""
+            )
             + (f" Исключено клиентов в обеих группах: {overlap_count}." if overlap_count else "")
         ),
     }
@@ -323,8 +404,8 @@ def estimate_did(
 
     df = panel_df.copy()
     df["_y"] = pd.to_numeric(df[outcome_col], errors="coerce")
-    df["_dt"] = pd.to_datetime(df[period_col].astype(str), errors="coerce")
-    t0 = pd.to_datetime(str(intervention_period), errors="coerce")
+    df["_dt"] = [_coerce_timestamp(value) for value in df[period_col]]
+    t0 = _coerce_timestamp(intervention_period)
     df = df.dropna(subset=["_dt", "_y"])
     if df.empty or pd.isna(t0) or not treated_units:
         return {
@@ -374,10 +455,11 @@ def estimate_did(
     t_crit = float(stats.t.ppf(1.0 - alpha / 2.0, df=n - k))
     ci_95 = (round(att - t_crit * se_att, 4), round(att + t_crit * se_att, 4))
 
-    # Проверка параллельности пре-трендов на периодах до интервенции
+    # Проверка параллельности пре-трендов на периодах до интервенции.
+    # Мало пре-периодов — это «не проверялась», а не «пройдена» с p=1.
     pre_df = df[df["_post"] == 0.0].sort_values("_dt").copy()
-    parallel_trends_ok = True
-    pre_trend_p = 1.0
+    parallel_trends_ok = None
+    pre_trend_p = None
     if pre_df["_dt"].nunique() >= 2 and len(pre_df) >= 6:
         min_dt = pre_df["_dt"].min()
         pre_df["_t_num"] = (pre_df["_dt"] - min_dt).dt.days.astype(float)
@@ -407,12 +489,20 @@ def estimate_did(
         "ci_95": ci_95,
         "p_value": round(p_val, 6),
         "parallel_trends_ok": parallel_trends_ok,
-        "parallel_trends_p_value": round(pre_trend_p, 4),
+        "parallel_trends_p_value": round(pre_trend_p, 4) if pre_trend_p is not None else None,
         "observations": int(n),
         "assumption": (
             f"Оценка DiD выполнена с гетероскедастично-робастными ошибками HC1 "
-            f"(дата интервенции {t0.strftime('%Y-%m-%d')}). Проверка параллельности "
-            f"пре-трендов: p={pre_trend_p:.3f} "
-            f"({'пройдена' if parallel_trends_ok else 'НАРУШЕНА'})."
+            f"(дата интервенции {t0.strftime('%Y-%m-%d')}). HC1 не учитывает кластеризацию "
+            f"внутри единиц панели, на короткой панели p-value оптимистичен. "
+            + (
+                "Проверка параллельности пре-трендов не выполнялась: меньше двух пре-периодов "
+                "или меньше 6 наблюдений."
+                if parallel_trends_ok is None
+                else (
+                    f"Проверка параллельности пре-трендов: p={pre_trend_p:.3f} "
+                    f"({'пройдена' if parallel_trends_ok else 'НАРУШЕНА'})."
+                )
+            )
         ),
     }
