@@ -50,15 +50,27 @@ def check_srm(
 
     Порог жёсткий (0.001): при меньшем p-value расщепление считается поломкой
     рандомизации, и результаты теста не интерпретируются.
+
+    Поле ``status`` различает исходы: ``passed`` — проверка пройдена,
+    ``failed`` — SRM нарушен, ``unavailable`` — проверка невозможна (нет scipy
+    или вырожденные данные). Только ``failed`` означает поломку рандомизации;
+    ``unavailable`` не должен интерпретироваться как нарушение.
     """
     total = int(n_control + n_treatment)
     if total <= 0 or not (0.0 < expected_treatment_share < 1.0):
-        return {"srm_ok": False, "p_value": 0.0, "chi2": 0.0}
+        return {
+            "srm_ok": False,
+            "status": "unavailable",
+            "p_value": None,
+            "chi2": None,
+            "assumption": "SRM не проверен: нет наблюдений или некорректная ожидаемая доля.",
+        }
     if stats is None:
         return {
             "srm_ok": False,
-            "p_value": 0.0,
-            "chi2": 0.0,
+            "status": "unavailable",
+            "p_value": None,
+            "chi2": None,
             "assumption": SCIPY_REQUIRED,
         }
 
@@ -68,6 +80,7 @@ def check_srm(
     p_val = float(1.0 - stats.chi2.cdf(chi2, df=1))
     return {
         "srm_ok": bool(p_val >= alpha_srm),
+        "status": "passed" if p_val >= alpha_srm else "failed",
         "p_value": round(p_val, 6),
         "chi2": round(float(chi2), 4),
         "observed_treatment_share": round(n_treatment / total, 4),
@@ -336,7 +349,7 @@ def run_ab_test(
     worsened = diff < 0 if higher_is_better else diff > 0
     if overlap_count:
         decision = "invalid_assignment_overlap"
-    elif not srm_info["srm_ok"]:
+    elif srm_info.get("status") == "failed":
         decision = "invalid_srm_detected"
     elif p_val < alpha and improved:
         decision = "launch"

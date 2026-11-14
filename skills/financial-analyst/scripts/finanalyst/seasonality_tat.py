@@ -316,15 +316,24 @@ def funnel_tat(
         sales_cols = [c for c in (entity_col, "manager_id", "result") if c in sales.columns]
         if len(sales_cols) > 1:
             sales_meta = sales[sales_cols].drop_duplicates(subset=[entity_col])
-            sales_dict = {str(row[entity_col]): row for _, row in sales_meta.iterrows() if pd.notna(row[entity_col])}
+            # itertuples вместо iterrows: словарь строится по всей таблице sales,
+            # и на больших выгрузках разница на порядки.
+            sales_dict: dict[str, dict] = {}
+            for row in sales_meta.itertuples(index=False):
+                key_value = getattr(row, entity_col)
+                if pd.notna(key_value):
+                    sales_dict[str(key_value)] = {
+                        "manager_id": getattr(row, "manager_id", None),
+                        "result": getattr(row, "result", None),
+                    }
             for i, ent in enumerate(app_entity):
-                key = str(ent)
-                if key in sales_dict:
-                    sr = sales_dict[key]
-                    if "manager_id" in sr and pd.notna(sr["manager_id"]):
-                        app_manager[i] = str(sr["manager_id"]).strip()
-                    if "result" in sr and pd.notna(sr["result"]):
-                        app_result[i] = str(sr["result"]).strip()
+                sr = sales_dict.get(str(ent))
+                if sr is None:
+                    continue
+                if sr["manager_id"] is not None and pd.notna(sr["manager_id"]):
+                    app_manager[i] = str(sr["manager_id"]).strip()
+                if sr["result"] is not None and pd.notna(sr["result"]):
+                    app_result[i] = str(sr["result"]).strip()
 
     segment_rows: list[dict] = []
     for seg_col_name, seg_col_data in [
