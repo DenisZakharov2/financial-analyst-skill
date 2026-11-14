@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import secrets
 import sys
 import traceback
+from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -22,6 +25,7 @@ from .core import (
     KNOWN_TABLES,
     WORKBOOK_SUFFIXES,
     DataLoadError,
+    QualityReport,
     assert_no_blocking_failures,
     load_tables,
     normalize_periods,
@@ -395,7 +399,50 @@ def _run_forecast(series: pd.DataFrame, args: argparse.Namespace) -> dict:
 # Основной сценарий
 # --------------------------------------------------------------------------
 
-def run(args: argparse.Namespace) -> int:
+@dataclass
+class _Pipeline:
+    """Общее состояние конвейера отчёта: аргументы, таблицы и накопители результата."""
+
+    args: argparse.Namespace
+    data_dir: Path
+    out_dir: Path
+    charts_dir: Path
+    formats: list[str]
+    tables: dict[str, pd.DataFrame] = field(default_factory=dict)
+    pii_mode: str = "strict"
+    notes: list[str] = field(default_factory=list)
+    sections: list[tuple[str, pd.DataFrame, str]] = field(default_factory=list)
+    assumptions: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    headline: list[dict] = field(default_factory=list)
+    charts: dict[str, Path] = field(default_factory=dict)
+    metrics_payload: dict = field(default_factory=dict)
+    quality: QualityReport | None = None
+    ab_result: dict | None = None
+    ab_source_name: str | None = None
+    ab_group_col: str = "experiment_group"
+    unit: dict = field(default_factory=dict)
+
+
+def _safe_chart(p: _Pipeline, key: str, warning: str, build) -> None:
+    """Строит график и кладёт его в p.charts.
+
+    Обход бага tight_layout в matplotlib: RecursionError на новых версиях Python
+    ожидаем и молча пропускается, прочий сбой превращается в предупреждение,
+    чтобы ошибка одного графика не ломала весь отчёт.
+    """
+    try:
+        chart = build()
+        if chart:
+            p.charts[key] = chart
+    except RecursionError:
+        pass
+    except Exception as e:
+        p.warnings.append(f"{warning}: {e}")
+
+
+def _prepare_dirs(args: argparse.Namespace) -> tuple[Path, Path, Path, list[str]]:
+    """Готовит каталоги вывода: создаёт out и charts, удаляет устаревшие файлы."""
     data_dir: Path = args.data_dir
     out_dir: Path = args.out
     formats = [item.strip().lower() for item in args.format.split(",") if item.strip()]
@@ -407,14 +454,18 @@ def run(args: argparse.Namespace) -> int:
     for stale in ("dashboard.html", "financial_analyst_report.html", "report.html"):
         (out_dir / stale).unlink(missing_ok=True)
     setup_matplotlib()
+    return data_dir, out_dir, charts_dir, formats
 
+
+def _stage_load(p: _Pipeline) -> None:
+    """Загрузка таблиц: адаптеры, нормализация, защита ПДн, отбрасывание лишнего."""
+    args = p.args
     # В режиме auto/cbr книги stat_*.xlsx читает cbr_survey.parse_workbook (все листы),
     # поэтому пропускаем их в load_tables, чтобы не читать первый лист дважды.
     skip_patterns = ("stat_",) if args.adapter in {"auto", "cbr"} else ()
-    tables = load_tables(data_dir, skip_patterns=skip_patterns)
-    notes: list[str] = []
+    tables = load_tables(p.data_dir, skip_patterns=skip_patterns)
 
-    workbook_paths = sorted(path for path in data_dir.iterdir()
+    workbook_paths = sorted(path for path in p.data_dir.iterdir()
                             if path.suffix.lower() in WORKBOOK_SUFFIXES)
     # В auto берём только выгрузки с префиксом stat_: в одном каталоге могут лежать
     # и клиентские книги. С --adapter cbr разбираем любую книгу, которая читается.
@@ -428,50 +479,52 @@ def run(args: argparse.Namespace) -> int:
             survey = normalize_periods(survey)
             tables["macro_survey"] = survey
             count = f"{len(survey):,}".replace(",", " ")
-            notes.append(f"Выгрузка {path.name}: {count} строк, "
+            p.notes.append(f"Выгрузка {path.name}: {count} строк, "
                          f"{survey['industry'].nunique()} отраслей, "
                          f"{survey['indicator'].nunique()} показателей.")
             break
         else:
             if args.adapter == "auto" and survey_paths:
-                notes.append("Книга stat_*.xlsx найдена, но выгрузка опросов не распознана: "
+                p.notes.append("Книга stat_*.xlsx найдена, но выгрузка опросов не распознана: "
                              "проверьте строку заголовков и листы.")
-            elif args.adapter == "auto" and any(p.name.lower().startswith("stat_") for p in workbook_paths):
+            elif args.adapter == "auto" and any(wb.name.lower().startswith("stat_") for wb in workbook_paths):
                 # Предупреждаем только если есть файлы stat_*, но они не распознались
-                notes.append("Книга с опросами не найдена: адаптер ищет файл stat_*.xlsx. "
+                p.notes.append("Книга с опросами не найдена: адаптер ищет файл stat_*.xlsx. "
                              "Для файла с другим именем запустите с --adapter cbr.")
     if args.adapter == "client":
         tables.pop("macro_survey", None)
 
     tables, alias_notes = client_csv.normalize(tables)
-    notes.extend(alias_notes)
+    p.notes.extend(alias_notes)
 
     # --- PII sanitization (before quality gates) ---
     pii_mode = getattr(args, "pii_mode", "strict")
+    p.pii_mode = pii_mode
     if pii_mode != "off":
         tables, pii_report = sanitize_tables(tables, mode=pii_mode)
         if pii_report.get("pii_found"):
             if pii_mode == "strict":
-                # In strict mode, sanitize_tables raises ValueError, so we only get here in redact mode
+                # В строгом режиме sanitize_tables бросает ValueError,
+                # поэтому сюда попадаем только в режиме redact.
                 pass
-            notes.append(
+            p.notes.append(
                 f"PII: режим={pii_mode}, удалены колонки={pii_report['findings']}, "
                 f"псевдонимизированы ключи={pii_report['pseudonymized_columns']}"
             )
             if pii_report.get("key_ephemeral"):
-                notes.append(
+                p.notes.append(
                     "PII: ключ HMAC сгенерирован на один запуск. Задайте FINANALYST_PII_KEY, "
                     "чтобы псевдонимы совпадали между запусками."
                 )
         else:
-            notes.append("PII: прямых ПДн не обнаружено")
+            p.notes.append("PII: прямых ПДн не обнаружено")
 
     survey_table = tables.get("macro_survey")
     if survey_table is not None and "period_start" not in survey_table.columns:
         if "period" in survey_table.columns:
             tables["macro_survey"] = normalize_periods(survey_table)
         else:
-            notes.append("macro_survey: нет колонки period — раздел пропущен.")
+            p.notes.append("macro_survey: нет колонки period — раздел пропущен.")
             tables.pop("macro_survey")
 
     # Удаляем служебные таблицы (отчёты, загруженные по ошибке)
@@ -480,50 +533,59 @@ def run(args: argparse.Namespace) -> int:
             tables.pop(key)
             continue
         if key not in KNOWN_TABLES:
-            notes.append(f"Пропущена таблица {key!r}: её нет в словаре данных.")
+            p.notes.append(f"Пропущена таблица {key!r}: её нет в словаре данных.")
             tables.pop(key)
 
-    # --- A/B-тест (--ab-test): считается до контроля качества, потому что
-    # нарушение SRM делает результат теста недействительным, а не предупреждением.
-    ab_result: dict | None = None
-    ab_source_name: str | None = None
-    if getattr(args, "ab_test", False):
-        group_col = getattr(args, "ab_group_col", "experiment_group")
-        ab_source_name, ab_frame = _ab_source(tables, group_col)
-        if ab_frame is None:
-            notes.append(
-                f"A/B-тест пропущен: в таблицах нет колонки групп «{group_col}»."
-            )
-        else:
-            metric_col = _ab_metric_column(ab_frame, getattr(args, "ab_metric", "value"))
-            if metric_col is None:
-                notes.append(
-                    "A/B-тест пропущен: в таблице "
-                    f"«{ab_source_name}» нет колонки метрики "
-                    f"(искали «{getattr(args, 'ab_metric', 'value')}», amount, balance, revenue)."
-                )
-            else:
-                ab_result = run_ab_test(
-                    ab_frame,
-                    group_col=group_col,
-                    metric_col=metric_col,
-                    denominator_col=getattr(args, "ab_denominator", None),
-                    pre_metric_col=getattr(args, "ab_pre_metric", None),
-                    metric_type=getattr(args, "ab_metric_type", "continuous"),
-                    higher_is_better=not getattr(args, "ab_lower_is_better", False),
-                )
+    p.tables = tables
 
-    quality = validate_inputs(tables)
-    if ab_result is not None and ab_result.get("available"):
-        srm = ab_result.get("srm_check", {})
-        srm_ok = bool(srm.get("srm_ok"))
-        overlap = int(ab_result.get("assignment_overlap_clients", 0))
-        quality.add(
-            "ab_srm_check",
-            srm_ok,
-            (f"SRM пройден: p={srm.get('p_value')}" if srm_ok
-             else f"Нарушен SRM: p={srm.get('p_value')} < 0.001 — результат теста недействителен"),
+
+def _stage_ab_test(p: _Pipeline) -> None:
+    """A/B-тест (--ab-test): считается до контроля качества, потому что
+    нарушение SRM делает результат теста недействительным, а не предупреждением."""
+    if not getattr(p.args, "ab_test", False):
+        return
+    group_col = getattr(p.args, "ab_group_col", "experiment_group")
+    p.ab_group_col = group_col
+    ab_source_name, ab_frame = _ab_source(p.tables, group_col)
+    if ab_frame is None:
+        p.notes.append(
+            f"A/B-тест пропущен: в таблицах нет колонки групп «{group_col}»."
         )
+        return
+    metric_col = _ab_metric_column(ab_frame, getattr(p.args, "ab_metric", "value"))
+    if metric_col is None:
+        p.notes.append(
+            "A/B-тест пропущен: в таблице "
+            f"«{ab_source_name}» нет колонки метрики "
+            f"(искали «{getattr(p.args, 'ab_metric', 'value')}\", amount, balance, revenue)."
+        )
+        return
+    p.ab_source_name = ab_source_name
+    p.ab_result = run_ab_test(
+        ab_frame,
+        group_col=group_col,
+        metric_col=metric_col,
+        denominator_col=getattr(p.args, "ab_denominator", None),
+        pre_metric_col=getattr(p.args, "ab_pre_metric", None),
+        metric_type=getattr(p.args, "ab_metric_type", "continuous"),
+        higher_is_better=not getattr(p.args, "ab_lower_is_better", False),
+    )
+
+
+def _stage_quality(p: _Pipeline) -> None:
+    """Контроль качества входных данных и проверки A/B-теста (SRM, пересечение групп)."""
+    quality = validate_inputs(p.tables)
+    if p.ab_result is not None and p.ab_result.get("available"):
+        srm = p.ab_result.get("srm_check", {})
+        srm_ok = bool(srm.get("srm_ok"))
+        overlap = int(p.ab_result.get("assignment_overlap_clients", 0))
+        if srm_ok:
+            srm_detail = f"SRM пройден: p={srm.get('p_value')}"
+        elif srm.get("status") == "unavailable":
+            srm_detail = f"SRM не проверен: {srm.get('assumption', '')}"
+        else:
+            srm_detail = f"Нарушен SRM: p={srm.get('p_value')} < 0.001 — результат теста недействителен"
+        quality.add("ab_srm_check", srm_ok, srm_detail)
         quality.add(
             "ab_assignment_overlap",
             overlap == 0,
@@ -531,149 +593,248 @@ def run(args: argparse.Namespace) -> int:
              "результат теста помечен недействительным"
              if overlap else "Каждый клиент принадлежит одной группе"),
         )
-    log(args, f"Контроль качества: {len(quality.checks)} проверок, "
+    p.quality = quality
+    log(p.args, f"Контроль качества: {len(quality.checks)} проверок, "
               f"{len(quality.failed)} fail, {len(quality.warned)} warn")
     for check in quality.failed + quality.warned:
-        log(args, f"  [{check.status}] {check.check_id}: {check.detail}")
+        log(p.args, f"  [{check.status}] {check.check_id}: {check.detail}")
 
-    if args.strict:
+    if p.args.strict:
         assert_no_blocking_failures(quality)
 
-    sections: list[tuple[str, pd.DataFrame, str]] = []
-    assumptions: list[str] = []
-    warnings: list[str] = list(quality.warnings)
-    headline: list[dict] = []
-    unit: dict = {}
-    charts: dict[str, Path] = {}
-    metrics_payload: dict = {
+
+def _init_metrics_payload(p: _Pipeline) -> None:
+    """Инициализирует metrics_payload: метаданные, качество и накопители разделов."""
+    p.metrics_payload = {
         "meta": {
             "version": __version__,
-            "data_dir": data_dir.name,
-            "adapter": args.adapter,
-            "generated_at": __import__('datetime').datetime.now().isoformat(timespec="seconds"),
+            "data_dir": p.data_dir.name,
+            "adapter": p.args.adapter,
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
         },
-        "quality": quality.to_dict(),
-        "assumptions": assumptions,
-        "warnings": warnings,
+        "quality": p.quality.to_dict(),
+        "assumptions": p.assumptions,
+        "warnings": p.warnings,
         "sections": {},
     }
 
-    portfolio = tables.get("portfolio")
-    clients = tables.get("clients")
-    products = tables.get("products")
-    survey = tables.get("macro_survey")
 
-    # --- Портфель ---------------------------------------------------------
-    if portfolio is not None and "balance" in portfolio.columns:
-        result = portfolio_summary(portfolio, products, clients)
-        frame = result["rows"]
-        sections.append(("Портфель по типам продуктов", frame, ""))
-        metrics_payload["sections"]["portfolio"] = {
-            "totals": result["totals"], "rows": records(frame),
-        }
-        total_balance = result["totals"]["total_balance"]
-        headline.append(headline_row("Остаток по портфелю", total_balance / 1e6, "млн руб.",
-                                     "portfolio.balance", digits=1))
-        headline.append(headline_row("Счетов в портфеле", result["totals"]["accounts"], "шт.",
-                                     "portfolio.account_id", digits=0))
-        if result["totals"].get("par30_pct") is not None:
-            headline.append(headline_row("PAR 30", result["totals"]["par30_pct"], "%",
-                                         "portfolio.dpd"))
-        # Workaround for matplotlib tight_layout recursion bug in Python 3.14
-        try:
-            chart = chart_portfolio(frame, charts_dir / "portfolio.png")
-            if chart:
-                charts["Портфель по типам продуктов"] = chart
-        except RecursionError:
-            pass
-        except Exception as e:
-            warnings.append(f"Ошибка построения графика портфеля: {e}")
+def _stage_portfolio(p: _Pipeline) -> None:
+    """Раздел «Портфель»: сводка по типам продуктов и график."""
+    portfolio = p.tables.get("portfolio")
+    if portfolio is None or "balance" not in portfolio.columns:
+        return
+    result = portfolio_summary(portfolio, p.tables.get("products"), p.tables.get("clients"))
+    frame = result["rows"]
+    p.sections.append(("Портфель по типам продуктов", frame, ""))
+    p.metrics_payload["sections"]["portfolio"] = {
+        "totals": result["totals"], "rows": records(frame),
+    }
+    total_balance = result["totals"]["total_balance"]
+    p.headline.append(headline_row("Остаток по портфелю", total_balance / 1e6, "млн руб.",
+                                 "portfolio.balance", digits=1))
+    p.headline.append(headline_row("Счетов в портфеле", result["totals"]["accounts"], "шт.",
+                                 "portfolio.account_id", digits=0))
+    if result["totals"].get("par30_pct") is not None:
+        p.headline.append(headline_row("PAR 30", result["totals"]["par30_pct"], "%",
+                                     "portfolio.dpd"))
+    _safe_chart(p, "Портфель по типам продуктов", "Ошибка построения графика портфеля",
+                lambda: chart_portfolio(frame, p.charts_dir / "portfolio.png"))
 
-    # --- Воронка ----------------------------------------------------------
-    funnel_source = tables.get("funnel_events")
+
+def _stage_funnel(p: _Pipeline) -> None:
+    """Раздел «Воронка»: сводка, поэтапный TAT и SLA, сезонность событий."""
+    funnel_source = p.tables.get("funnel_events")
     funnel_column = "stage"
     funnel_table_name = "funnel_events"
-    if funnel_source is None and tables.get("sales") is not None:
-        funnel_source = tables["sales"]
+    if funnel_source is None and p.tables.get("sales") is not None:
+        funnel_source = p.tables["sales"]
         funnel_column = "funnel_stage"
         funnel_table_name = "sales"
-    if funnel_source is not None and funnel_column in funnel_source.columns:
-        funnel = funnel_summary(funnel_source, funnel_column)
-        sections.append(("Воронка продаж", funnel["rows"], funnel["assumption"]))
-        assumptions.append(funnel["assumption"])
-        metrics_payload["sections"]["funnel"] = {
-            "rows": records(funnel["rows"]),
-            "entities": funnel["entities"],
-            "assumption": funnel["assumption"],
+    if funnel_source is None or funnel_column not in funnel_source.columns:
+        return
+    funnel = funnel_summary(funnel_source, funnel_column)
+    p.sections.append(("Воронка продаж", funnel["rows"], funnel["assumption"]))
+    p.assumptions.append(funnel["assumption"])
+    p.metrics_payload["sections"]["funnel"] = {
+        "rows": records(funnel["rows"]),
+        "entities": funnel["entities"],
+        "assumption": funnel["assumption"],
+    }
+    last = funnel["rows"].iloc[-1]
+    p.headline.append(headline_row("Сквозная конверсия", last["from_start_pct"], "%",
+                                 funnel_table_name))
+    p.headline.append(headline_row("Участников воронки", funnel["entities"], funnel["entity"],
+                                 funnel_table_name, digits=0))
+    _safe_chart(p, "Воронка продаж", "Ошибка построения графика воронки",
+                lambda: chart_funnel(funnel["rows"], p.charts_dir / "funnel.png"))
+
+    # --- Поэтапный TAT и SLA ---
+    sales_for_tat = p.tables.get("sales") if funnel_table_name == "funnel_events" else None
+    tat_result = funnel_tat(funnel_source, sales=sales_for_tat)
+    if tat_result.get("available"):
+        if not tat_result["by_transition"].empty:
+            p.sections.append(("Воронка: поэтапный TAT (дни)", tat_result["by_transition"],
+                             tat_result["assumption"]))
+            p.metrics_payload["sections"]["funnel_tat"] = {
+                "by_transition": records(tat_result["by_transition"]),
+                "skipped_transitions": records(tat_result["skipped_transitions"]),
+                "skipped_count": tat_result.get("skipped_count", 0),
+                "backward_count": tat_result.get("backward_count", 0),
+                "by_segment": records(tat_result["by_segment"]),
+                "aging_backlog": records(tat_result["aging_backlog"]),
+                "survival_curve": records(tat_result["survival_curve"]),
+                "reference_date": tat_result["reference_date"],
+                "assumption": tat_result["assumption"],
+            }
+            # Headline: медианный TAT по последнему переходу
+            last_trans = tat_result["by_transition"].iloc[-1]
+            p.headline.append(headline_row(
+                f"TAT {last_trans['transition']} (медиана)", last_trans["median_p50_days"], "дней",
+                "funnel_events"
+            ))
+        if not tat_result.get("skipped_transitions", pd.DataFrame()).empty:
+            p.sections.append((
+                "Воронка: переходы с пропущенным этапом",
+                tat_result["skipped_transitions"],
+                "Эти переходы охватывают несколько этапов сразу, поэтому в SLA и TAT "
+                "по этапам не входят.",
+            ))
+        if not tat_result["aging_backlog"].empty:
+            p.sections.append(("Воронка: зависший бэклог", tat_result["aging_backlog"], ""))
+        if not tat_result["survival_curve"].empty:
+            p.sections.append(("Воронка: удержание Каплана-Мейера", tat_result["survival_curve"], ""))
+
+    # --- Сезонность воронки (если есть даты и количества) ---
+    date_col = next((c for c in ("event_date", "stage_date", "application_date")
+                     if c in funnel_source.columns), None)
+    if date_col is not None:
+        funnel_ts = funnel_source[[date_col]].copy()
+        # Приводим даты событий к началу месяца (YYYY-MM-01) и считаем поток событий
+        funnel_periods = []
+        for value in funnel_ts[date_col]:
+            ym = period_ym(value) if pd.notna(value) else ""
+            funnel_periods.append(f"{ym}-01" if ym else "")
+        funnel_ts["period"] = funnel_periods
+        funnel_ts["events_count"] = 1.0
+        season_result = seasonality_summary(funnel_ts, value_col="events_count", period_col="period")
+        if season_result.get("available"):
+            p.sections.append(("Воронка: сезонные индексы", season_result["seasonal_indices"],
+                             season_result["assumption"]))
+            p.metrics_payload["sections"]["funnel_seasonality"] = {
+                "seasonal_indices": records(season_result["seasonal_indices"]),
+                "components": records(season_result["components"]),
+                "strength_seasonal": season_result["strength_seasonal"],
+                "strength_trend": season_result["strength_trend"],
+                "mode_used": season_result["mode_used"],
+                "assumption": season_result["assumption"],
+            }
+
+
+def _stage_ab_report(p: _Pipeline) -> None:
+    """Раздел «Эксперимент»: отчёт по A/B-тесту."""
+    ab_result = p.ab_result
+    if ab_result is None:
+        return
+    if ab_result.get("available"):
+        p.sections.append(("Эксперимент: A/B-тест", _ab_report_frame(ab_result),
+                         ab_result["assumption"]))
+        p.assumptions.append(ab_result["assumption"])
+        p.metrics_payload["sections"]["ab_test"] = ab_result
+        p.headline.append(headline_row(
+            "A/B: абсолютный эффект", ab_result.get("absolute_effect"), "",
+            f"{p.ab_source_name}.{p.ab_group_col}"))
+        p.headline.append(headline_row(
+            "A/B: относительный эффект", ab_result.get("relative_uplift_pct"), "%",
+            f"{p.ab_source_name}.{p.ab_group_col}"))
+    else:
+        p.warnings.append(f"A/B-тест не рассчитан: {ab_result.get('assumption', '')}")
+
+
+def _stage_segmentation(p: _Pipeline) -> None:
+    """Раздел «Сегментация клиентов» (--segment): RFM + Risk, опционально кластеризация."""
+    if not getattr(p.args, "segment", False):
+        return
+    clients_table = p.tables.get("clients")
+    portfolio_table = p.tables.get("portfolio")
+    if clients_table is None or portfolio_table is None:
+        p.warnings.append("Сегментация пропущена: нужны таблицы clients и portfolio.")
+        return
+    segmentation_result = segment_clients(
+        clients_table,
+        portfolio_table,
+        sales=p.tables.get("sales"),
+        enable_clustering=not getattr(p.args, "no_cluster", False),
+    )
+    if segmentation_result.get("available"):
+        p.sections.append(("Клиенты: сегменты RFM + Risk",
+                         _segment_report_frame(segmentation_result["profiles"]),
+                         segmentation_result["assumption"]))
+        p.assumptions.append(segmentation_result["assumption"])
+        p.metrics_payload["sections"]["segmentation"] = {
+            "profiles": records(segmentation_result["profiles"]),
+            "client_assignments": records(segmentation_result["client_assignments"]),
+            "optimal_k": segmentation_result["optimal_k"],
+            "silhouette_score": segmentation_result["silhouette_score"],
+            "assumption": segmentation_result["assumption"],
         }
-        last = funnel["rows"].iloc[-1]
-        headline.append(headline_row("Сквозная конверсия", last["from_start_pct"], "%",
-                                     funnel_table_name))
-        headline.append(headline_row("Участников воронки", funnel["entities"], funnel["entity"],
-                                     funnel_table_name, digits=0))
-        # Workaround for matplotlib tight_layout recursion bug in Python 3.14
-        try:
-            chart = chart_funnel(funnel["rows"], charts_dir / "funnel.png")
-            if chart:
-                charts["Воронка продаж"] = chart
-        except RecursionError:
-            pass
-        except Exception as e:
-            warnings.append(f"Ошибка построения графика воронки: {e}")
+        top = segmentation_result["profiles"].iloc[0]
+        p.headline.append(headline_row(
+            f"Крупнейший сегмент: {top['rfm_segment']}",
+            top["portfolio_share_pct"], "%", "clients, portfolio"))
+    else:
+        p.warnings.append(f"Сегментация не рассчитана: {segmentation_result.get('assumption', '')}")
 
-        # --- Поэтапный TAT и SLA ---
-        sales_for_tat = tables.get("sales") if funnel_table_name == "funnel_events" else None
-        tat_result = funnel_tat(funnel_source, sales=sales_for_tat)
-        if tat_result.get("available"):
-            if not tat_result["by_transition"].empty:
-                sections.append(("Воронка: поэтапный TAT (дни)", tat_result["by_transition"],
-                                 tat_result["assumption"]))
-                metrics_payload["sections"]["funnel_tat"] = {
-                    "by_transition": records(tat_result["by_transition"]),
-                    "skipped_transitions": records(tat_result["skipped_transitions"]),
-                    "skipped_count": tat_result.get("skipped_count", 0),
-                    "backward_count": tat_result.get("backward_count", 0),
-                    "by_segment": records(tat_result["by_segment"]),
-                    "aging_backlog": records(tat_result["aging_backlog"]),
-                    "survival_curve": records(tat_result["survival_curve"]),
-                    "reference_date": tat_result["reference_date"],
-                    "assumption": tat_result["assumption"],
-                }
-                # Headline: медианный TAT по последнему переходу
-                last_trans = tat_result["by_transition"].iloc[-1]
-                headline.append(headline_row(
-                    f"TAT {last_trans['transition']} (медиана)", last_trans["median_p50_days"], "дней",
-                    "funnel_events"
-                ))
-            if not tat_result.get("skipped_transitions", pd.DataFrame()).empty:
-                sections.append((
-                    "Воронка: переходы с пропущенным этапом",
-                    tat_result["skipped_transitions"],
-                    "Эти переходы охватывают несколько этапов сразу, поэтому в SLA и TAT "
-                    "по этапам не входят.",
-                ))
-            if not tat_result["aging_backlog"].empty:
-                sections.append(("Воронка: зависший бэклог", tat_result["aging_backlog"], ""))
-            if not tat_result["survival_curve"].empty:
-                sections.append(("Воронка: удержание Каплана-Мейера", tat_result["survival_curve"], ""))
 
-        # --- Сезонность воронки (если есть даты и количества) ---
-        date_col = next((c for c in ("event_date", "stage_date", "application_date")
-                         if c in funnel_source.columns), None)
-        if date_col is not None:
-            funnel_ts = funnel_source[[date_col]].copy()
-            # Приводим даты событий к началу месяца (YYYY-MM-01) и считаем поток событий
-            funnel_periods = []
-            for value in funnel_ts[date_col]:
-                ym = period_ym(value) if pd.notna(value) else ""
-                funnel_periods.append(f"{ym}-01" if ym else "")
-            funnel_ts["period"] = funnel_periods
-            funnel_ts["events_count"] = 1.0
-            season_result = seasonality_summary(funnel_ts, value_col="events_count", period_col="period")
+def _stage_finance(p: _Pipeline) -> None:
+    """Раздел «Финансы»: показатели, юнит-экономика, сезонность и прогноз выручки."""
+    finance = p.tables.get("finance")
+    if finance is None or finance.empty:
+        return
+    portfolio = p.tables.get("portfolio")
+    clients = p.tables.get("clients")
+    fin = finance_summary(finance, portfolio, p.tables.get("products"))
+    p.sections.append(("Финансовые показатели", fin["rows"], "Выручка = проценты + комиссии + премии; "
+                                                    "прямые расходы = фондирование + резервы."))
+    totals = fin["totals"]
+    p.metrics_payload["sections"]["finance"] = {"totals": totals, "rows": records(fin["rows"])}
+    p.headline.append(headline_row("Выручка", totals["revenue"] / 1e6, "млн руб.", "finance",
+                                 digits=1))
+    if totals.get("margin_pct") is not None:
+        p.headline.append(headline_row("Валовая маржа", totals["margin_pct"], "%", "finance"))
+    unit = unit_economics(finance, clients, portfolio, p.tables.get("sales"),
+                          lifetime_months=p.args.lifetime_months)
+    p.unit = unit
+    p.assumptions.extend(unit["assumptions"])
+    unit_frame = pd.DataFrame([
+        {"Показатель": "Выручка", "Значение": fmt_num(unit["revenue"] / 1e6, 2), "Ед.": "млн руб."},
+        {"Показатель": "Активные клиенты", "Значение": fmt_num(unit["active_clients"], 0), "Ед.": "чел."},
+        {"Показатель": "Новые клиенты за период", "Значение": fmt_num(unit["new_clients"], 0),
+         "Ед.": "чел."},
+        {"Показатель": "ARPU (в месяц)", "Значение": fmt_num(unit["arpu"], 2), "Ед.": "руб./клиент"},
+        {"Показатель": "CAC", "Значение": fmt_num(unit["cac"], 2), "Ед.": "руб./клиент"},
+        {"Показатель": "LTV (gross)", "Значение": fmt_num(unit["ltv_gross"], 2), "Ед.": "руб."},
+        {"Показатель": "LTV / CAC", "Значение": fmt_num(unit["ltv_cac"], 2), "Ед.": "x"},
+        {"Показатель": "Окупаемость CAC", "Значение": fmt_num(unit["payback_months"], 1), "Ед.": "мес."},
+    ])
+    p.sections.append(("Юнит-экономика", unit_frame,
+                     f"Срок жизни клиента: {unit['lifetime_months']:.0f} мес."))
+    p.metrics_payload["sections"]["unit_economics"] = unit
+    if unit["ltv_cac"] is not None:
+        client_src = unit.get("client_source", "нет данных")
+        ltv_source = f"finance, {client_src.split('.')[0]}" if "." in client_src else "finance, portfolio"
+        p.headline.append(headline_row("LTV / CAC", unit["ltv_cac"], "x", ltv_source))
+
+    # --- Сезонность финансов ---
+    if "period" in fin["rows"].columns:
+        fin_periods = fin["rows"][["period", "revenue"]].copy()
+        fin_periods = fin_periods.dropna(subset=["period"])
+        if not fin_periods.empty:
+            season_result = seasonality_summary(fin_periods, value_col="revenue", period_col="period")
             if season_result.get("available"):
-                sections.append(("Воронка: сезонные индексы", season_result["seasonal_indices"],
+                p.sections.append(("Финансы: сезонные индексы", season_result["seasonal_indices"],
                                  season_result["assumption"]))
-                metrics_payload["sections"]["funnel_seasonality"] = {
+                p.metrics_payload["sections"]["finance_seasonality"] = {
                     "seasonal_indices": records(season_result["seasonal_indices"]),
                     "components": records(season_result["components"]),
                     "strength_seasonal": season_result["strength_seasonal"],
@@ -682,271 +843,149 @@ def run(args: argparse.Namespace) -> int:
                     "assumption": season_result["assumption"],
                 }
 
-    # --- A/B-тест ---------------------------------------------------------
-    if ab_result is not None:
-        if ab_result.get("available"):
-            sections.append(("Эксперимент: A/B-тест", _ab_report_frame(ab_result),
-                             ab_result["assumption"]))
-            assumptions.append(ab_result["assumption"])
-            metrics_payload["sections"]["ab_test"] = ab_result
-            headline.append(headline_row(
-                "A/B: абсолютный эффект", ab_result.get("absolute_effect"), "",
-                f"{ab_source_name}.{group_col}"))
-            headline.append(headline_row(
-                "A/B: относительный эффект", ab_result.get("relative_uplift_pct"), "%",
-                f"{ab_source_name}.{group_col}"))
-        else:
-            warnings.append(f"A/B-тест не рассчитан: {ab_result.get('assumption', '')}")
+    # --- Прогноз выручки: только при явно выбранной модели (legacy-режим
+    # оставляет отчёт без изменений) ---
+    if getattr(p.args, "forecast_model", "legacy") != "legacy" and "period" in fin["rows"].columns:
+        revenue_series = (fin["rows"].groupby("period", as_index=False)["revenue"].sum()
+                          .rename(columns={"period": "period_start", "revenue": "value"})
+                          .sort_values("period_start"))
+        revenue_forecast = _run_forecast(revenue_series, p.args)
+        if revenue_forecast.get("available"):
+            frame = pd.DataFrame({
+                "Период": [period[:7] if period.endswith("-01") else period
+                           for period in revenue_forecast["periods"]],
+                **{name: values for name, values in revenue_forecast["scenarios"].items()},
+            })
+            p.sections.append(("Финансы: прогноз выручки", frame,
+                             f"Модель: {revenue_forecast.get('method_used')}; "
+                             f"MAE: {revenue_forecast['mae']}; "
+                             f"sMAPE: {revenue_forecast.get('smape_pct')} %"))
+            p.metrics_payload["sections"]["finance_forecast"] = revenue_forecast
+            p.headline.append(headline_row(
+                "Прогноз выручки (базовый сценарий)",
+                revenue_forecast["scenarios"]["базовый"][0] / 1e6, "млн руб.", "finance", digits=1))
 
-    # --- Сегментация клиентов (--segment) ---------------------------------
-    if getattr(args, "segment", False):
-        clients_table = tables.get("clients")
-        portfolio_table = tables.get("portfolio")
-        if clients_table is None or portfolio_table is None:
-            warnings.append("Сегментация пропущена: нужны таблицы clients и portfolio.")
-        else:
-            segmentation_result = segment_clients(
-                clients_table,
-                portfolio_table,
-                sales=tables.get("sales"),
-                enable_clustering=not getattr(args, "no_cluster", False),
-            )
-            if segmentation_result.get("available"):
-                sections.append(("Клиенты: сегменты RFM + Risk",
-                                 _segment_report_frame(segmentation_result["profiles"]),
-                                 segmentation_result["assumption"]))
-                assumptions.append(segmentation_result["assumption"])
-                metrics_payload["sections"]["segmentation"] = {
-                    "profiles": records(segmentation_result["profiles"]),
-                    "client_assignments": records(segmentation_result["client_assignments"]),
-                    "optimal_k": segmentation_result["optimal_k"],
-                    "silhouette_score": segmentation_result["silhouette_score"],
-                    "assumption": segmentation_result["assumption"],
-                }
-                top = segmentation_result["profiles"].iloc[0]
-                headline.append(headline_row(
-                    f"Крупнейший сегмент: {top['rfm_segment']}",
-                    top["portfolio_share_pct"], "%", "clients, portfolio"))
-            else:
-                warnings.append(f"Сегментация не рассчитана: {segmentation_result.get('assumption', '')}")
 
-    # --- Финансы и юнит-экономика ----------------------------------------
-    finance = tables.get("finance")
-    if finance is not None and not finance.empty:
-        fin = finance_summary(finance, portfolio, products)
-        sections.append(("Финансовые показатели", fin["rows"], "Выручка = проценты + комиссии + премии; "
-                                                        "прямые расходы = фондирование + резервы."))
-        totals = fin["totals"]
-        metrics_payload["sections"]["finance"] = {"totals": totals, "rows": records(fin["rows"])}
-        headline.append(headline_row("Выручка", totals["revenue"] / 1e6, "млн руб.", "finance",
-                                     digits=1))
-        if totals.get("margin_pct") is not None:
-            headline.append(headline_row("Валовая маржа", totals["margin_pct"], "%", "finance"))
-        unit = unit_economics(finance, clients, portfolio, tables.get("sales"),
-                              lifetime_months=args.lifetime_months)
-        assumptions.extend(unit["assumptions"])
-        unit_frame = pd.DataFrame([
-            {"Показатель": "Выручка", "Значение": fmt_num(unit["revenue"] / 1e6, 2), "Ед.": "млн руб."},
-            {"Показатель": "Активные клиенты", "Значение": fmt_num(unit["active_clients"], 0), "Ед.": "чел."},
-            {"Показатель": "Новые клиенты за период", "Значение": fmt_num(unit["new_clients"], 0),
-             "Ед.": "чел."},
-            {"Показатель": "ARPU (в месяц)", "Значение": fmt_num(unit["arpu"], 2), "Ед.": "руб./клиент"},
-            {"Показатель": "CAC", "Значение": fmt_num(unit["cac"], 2), "Ед.": "руб./клиент"},
-            {"Показатель": "LTV (gross)", "Значение": fmt_num(unit["ltv_gross"], 2), "Ед.": "руб."},
-            {"Показатель": "LTV / CAC", "Значение": fmt_num(unit["ltv_cac"], 2), "Ед.": "x"},
-            {"Показатель": "Окупаемость CAC", "Значение": fmt_num(unit["payback_months"], 1), "Ед.": "мес."},
-        ])
-        sections.append(("Юнит-экономика", unit_frame,
-                         f"Срок жизни клиента: {unit['lifetime_months']:.0f} мес."))
-        metrics_payload["sections"]["unit_economics"] = unit
-        if unit["ltv_cac"] is not None:
-            client_src = unit.get("client_source", "нет данных")
-            ltv_source = f"finance, {client_src.split('.')[0]}" if "." in client_src else "finance, portfolio"
-            headline.append(headline_row("LTV / CAC", unit["ltv_cac"], "x", ltv_source))
-
-        # --- Сезонность финансов ---
-        if "period" in fin["rows"].columns:
-            fin_periods = fin["rows"][["period", "revenue"]].copy()
-            fin_periods = fin_periods.dropna(subset=["period"])
-            if not fin_periods.empty:
-                season_result = seasonality_summary(fin_periods, value_col="revenue", period_col="period")
-                if season_result.get("available"):
-                    sections.append(("Финансы: сезонные индексы", season_result["seasonal_indices"],
-                                     season_result["assumption"]))
-                    metrics_payload["sections"]["finance_seasonality"] = {
-                        "seasonal_indices": records(season_result["seasonal_indices"]),
-                        "components": records(season_result["components"]),
-                        "strength_seasonal": season_result["strength_seasonal"],
-                        "strength_trend": season_result["strength_trend"],
-                        "mode_used": season_result["mode_used"],
-                        "assumption": season_result["assumption"],
-                    }
-
-        # --- Прогноз выручки: только при явно выбранной модели (legacy-режим
-        # оставляет отчёт без изменений) ---
-        if getattr(args, "forecast_model", "legacy") != "legacy" and "period" in fin["rows"].columns:
-            revenue_series = (fin["rows"].groupby("period", as_index=False)["revenue"].sum()
-                              .rename(columns={"period": "period_start", "revenue": "value"})
-                              .sort_values("period_start"))
-            revenue_forecast = _run_forecast(revenue_series, args)
-            if revenue_forecast.get("available"):
-                frame = pd.DataFrame({
-                    "Период": [period[:7] if period.endswith("-01") else period
-                               for period in revenue_forecast["periods"]],
-                    **{name: values for name, values in revenue_forecast["scenarios"].items()},
-                })
-                sections.append(("Финансы: прогноз выручки", frame,
-                                 f"Модель: {revenue_forecast.get('method_used')}; "
-                                 f"MAE: {revenue_forecast['mae']}; "
-                                 f"sMAPE: {revenue_forecast.get('smape_pct')} %"))
-                metrics_payload["sections"]["finance_forecast"] = revenue_forecast
-                headline.append(headline_row(
-                    "Прогноз выручки (базовый сценарий)",
-                    revenue_forecast["scenarios"]["базовый"][0] / 1e6, "млн руб.", "finance", digits=1))
-
-    # --- Макро ------------------------------------------------------------
-    indicator = None
+def _stage_macro(p: _Pipeline) -> None:
+    """Раздел «Макро»: динамика показателя, аномалии, прогноз, корреляции, драйверы."""
+    survey = p.tables.get("macro_survey")
     if survey is not None and not survey.empty:
         missing = sorted({"period_start", "industry", "indicator", "value"} - set(survey.columns))
         if missing:
-            warnings.append(f"macro_survey: нет колонок {', '.join(missing)} — рыночный раздел пропущен.")
+            p.warnings.append(f"macro_survey: нет колонок {', '.join(missing)} — рыночный раздел пропущен.")
             survey = None
-    if survey is not None and not survey.empty:
-        indicator = args.indicator or cbr_survey.choose_indicator(survey)
-        available = sorted(str(value) for value in survey["indicator"].dropna().unique())
-        if indicator not in available:
-            raise MetricError(
-                "Показатель %r не найден в macro_survey. Доступны: %s"
-                % (indicator, ", ".join(available[:10]) or "нет")
-            )
-        industry = _pick_industry(survey, indicator)
-        series = _series(survey, indicator, industry)
-        # period_start может быть датой или текстом: .dt на тексте падает.
-        # Применяем macro_dynamics для расчёта change_pct и yoy_pct
-        series = macro_dynamics(series, value_col="value")
-        dynamics_view = series.tail(36).assign(
-            period_start=lambda d: period_labels(d["period_start"]))
-        cols = [c for c in ("period_start", "value", "change_pct", "yoy_pct") if c in dynamics_view.columns]
-        sections.append(("Макро: динамика показателя", dynamics_view[cols],
-                         f"Показатель: {indicator}. Отрасль: {industry}."))
-        anomalies = macro_anomalies(series, value_col="value", group_cols=())
-        if not anomalies.empty:
-            view = anomalies.assign(period_start=lambda d: period_labels(d["period_start"]))
-            sections.append(("Макро: аномалии", view[["period_start", "value", "_z"]].rename(
-                columns={"period_start": "Период", "value": "Значение", "_z": "Z-score"}), ""))
-        metrics_payload["sections"]["macro"] = {
-            "indicator": indicator,
+    if survey is None or survey.empty:
+        return
+    indicator = p.args.indicator or cbr_survey.choose_indicator(survey)
+    available = sorted(str(value) for value in survey["indicator"].dropna().unique())
+    if indicator not in available:
+        raise MetricError(
+            "Показатель %r не найден в macro_survey. Доступны: %s"
+            % (indicator, ", ".join(available[:10]) or "нет")
+        )
+    industry = _pick_industry(survey, indicator)
+    series = _series(survey, indicator, industry)
+    # period_start может быть датой или текстом: .dt на тексте падает.
+    # Применяем macro_dynamics для расчёта change_pct и yoy_pct
+    series = macro_dynamics(series, value_col="value")
+    dynamics_view = series.tail(36).assign(
+        period_start=lambda d: period_labels(d["period_start"]))
+    cols = [c for c in ("period_start", "value", "change_pct", "yoy_pct") if c in dynamics_view.columns]
+    p.sections.append(("Макро: динамика показателя", dynamics_view[cols],
+                     f"Показатель: {indicator}. Отрасль: {industry}."))
+    anomalies = macro_anomalies(series, value_col="value", group_cols=())
+    if not anomalies.empty:
+        view = anomalies.assign(period_start=lambda d: period_labels(d["period_start"]))
+        p.sections.append(("Макро: аномалии", view[["period_start", "value", "_z"]].rename(
+            columns={"period_start": "Период", "value": "Значение", "_z": "Z-score"}), ""))
+    p.metrics_payload["sections"]["macro"] = {
+        "indicator": indicator,
+        "industry": industry,
+        "points": int(len(series)),
+        "anomalies": records(anomalies),
+    }
+    p.headline.append(headline_row(f"{short(indicator)} (последнее)", series["value"].iloc[-1],
+                                 "п.", f"macro_survey, {industry}"))
+    _safe_chart(p, "Динамика по отрасли", "Ошибка построения графика макро-динамики",
+                lambda: chart_series(series, "value", "period_start", p.charts_dir / "macro.png",
+                                     label=industry))
+    if not anomalies.empty:
+        _safe_chart(p, "Аномалии по отрасли", "Ошибка построения графика аномалий",
+                    lambda: chart_anomalies(anomalies, p.charts_dir / "anomalies.png", label=industry))
+
+    forecast = _run_forecast(series, p.args)
+    p.metrics_payload["sections"]["forecast"] = forecast
+    if forecast.get("available"):
+        p.assumptions.append(forecast["assumption"])
+        frame = pd.DataFrame({
+            "Период": [period[:7] if period.endswith("-01") else period
+                       for period in forecast["periods"]],
+            **{name: values for name, values in forecast["scenarios"].items()},
+        })
+        model_note = ""
+        if forecast.get("method_used"):
+            model_note = (f"Модель: {forecast['method_used']}; "
+                          f"MAE: {forecast['mae']}; "
+                          f"sMAPE: {forecast.get('smape_pct')} %; "
+                          f"MASE: {forecast.get('mase')}")
+        else:
+            model_note = (f"MAE: {forecast['mae']}; "
+                          f"MAPE: {forecast['mape_pct'] if forecast['mape_pct'] is not None else '— (все факты в бэктесте = 0)'} %")
+        p.sections.append(("Прогноз: значения", frame, model_note))
+        _safe_chart(p, "Прогноз по сценариям", "Ошибка построения графика прогноза",
+                    lambda: chart_forecast(forecast, p.charts_dir / "forecast.png"))
+
+    # Корреляции показателей внутри отрасли: перестановочный p-value не даёт
+    # принять случайную связь за вывод, число проверенных пар фиксируется.
+    correlation = _correlations(survey, industry)
+    if not correlation["pairs"].empty:
+        note = "Корреляция не означает причинность: это связь, а не механизм."
+        p.sections.append(("Макро: корреляции показателей", correlation["pairs"], note))
+        p.assumptions.append(
+            f"{note} Проверено пар: {correlation['tested']}; "
+            f"показаны {len(correlation['pairs'])} с наибольшим |r|; "
+            "в матрицу вошло не более 8 показателей по покрытию."
+        )
+        p.metrics_payload["sections"]["correlations"] = {
             "industry": industry,
-            "points": int(len(series)),
-            "anomalies": records(anomalies),
+            "tested": int(correlation["tested"]),
+            "pairs": records(correlation["pairs"]),
         }
-        headline.append(headline_row(f"{short(indicator)} (последнее)", series["value"].iloc[-1],
-                                     "п.", f"macro_survey, {industry}"))
-        # Workaround for matplotlib tight_layout recursion bug in Python 3.14
-        try:
-            chart = chart_series(series, "value", "period_start", charts_dir / "macro.png",
-                             label=industry)
-            if chart:
-                charts["Динамика по отрасли"] = chart
-        except RecursionError:
-            pass
-        except Exception as e:
-            warnings.append(f"Ошибка построения графика макро-динамики: {e}")
-        if not anomalies.empty:
-            try:
-                chart = chart_anomalies(anomalies, charts_dir / "anomalies.png", label=industry)
-                if chart:
-                    charts["Аномалии по отрасли"] = chart
-            except RecursionError:
-                pass
-            except Exception as e:
-                warnings.append(f"Ошибка построения графика аномалий: {e}")
+        _safe_chart(p, "Корреляционная матрица", "Ошибка построения графика корреляций",
+                    lambda: chart_correlation(correlation["matrix"], p.charts_dir / "correlation.png"))
 
-        forecast = _run_forecast(series, args)
-        metrics_payload["sections"]["forecast"] = forecast
-        if forecast.get("available"):
-            assumptions.append(forecast["assumption"])
-            frame = pd.DataFrame({
-                "Период": [period[:7] if period.endswith("-01") else period
-                           for period in forecast["periods"]],
-                **{name: values for name, values in forecast["scenarios"].items()},
-            })
-            model_note = ""
-            if forecast.get("method_used"):
-                model_note = (f"Модель: {forecast['method_used']}; "
-                              f"MAE: {forecast['mae']}; "
-                              f"sMAPE: {forecast.get('smape_pct')} %; "
-                              f"MASE: {forecast.get('mase')}")
-            else:
-                model_note = (f"MAE: {forecast['mae']}; "
-                              f"MAPE: {forecast['mape_pct'] if forecast['mape_pct'] is not None else '— (все факты в бэктесте = 0)'} %")
-            sections.append(("Прогноз: значения", frame, model_note))
-            # Workaround for matplotlib tight_layout recursion bug in Python 3.14
-            try:
-                chart = chart_forecast(forecast, charts_dir / "forecast.png")
-                if chart:
-                    charts["Прогноз по сценариям"] = chart
-            except RecursionError:
-                pass
-            except Exception as e:
-                warnings.append(f"Ошибка построения графика прогноза: {e}")
+    if "html" in p.formats:
+        build_dashboard(survey, indicator, p.out_dir / "dashboard.html",
+                        title=f"Дашборд: {indicator}")
 
-        # Корреляции показателей внутри отрасли: перестановочный p-value не даёт
-        # принять случайную связь за вывод, число проверенных пар фиксируется.
-        correlation = _correlations(survey, industry)
-        if not correlation["pairs"].empty:
-            note = "Корреляция не означает причинность: это связь, а не механизм."
-            sections.append(("Макро: корреляции показателей", correlation["pairs"], note))
-            assumptions.append(
-                f"{note} Проверено пар: {correlation['tested']}; "
-                f"показаны {len(correlation['pairs'])} с наибольшим |r|; "
-                "в матрицу вошло не более 8 показателей по покрытию."
-            )
-            metrics_payload["sections"]["correlations"] = {
-                "industry": industry,
-                "tested": int(correlation["tested"]),
-                "pairs": records(correlation["pairs"]),
+    # --- Лаговые связи макропоказателей (--drivers) ---
+    if getattr(p.args, "drivers", False):
+        industry_frame = survey[survey["industry"] == industry]
+        lead_lag = macro_lead_lag(
+            industry_frame,
+            period_col="period" if "period" in industry_frame.columns else "period_start",
+            max_lag=getattr(p.args, "drivers_max_lag", 3),
+        )
+        if lead_lag.get("available"):
+            p.sections.append(("Макро: опережающие связи (Грейнджер)", lead_lag["links"],
+                             lead_lag["assumption"]))
+            p.assumptions.append(lead_lag["assumption"])
+            p.metrics_payload["sections"]["macro_lead_lag"] = {
+                "links": records(lead_lag["links"]),
+                "max_lag_used": lead_lag["max_lag_used"],
+                "periods_analyzed": lead_lag["periods_analyzed"],
+                "significant_count": lead_lag["significant_count"],
+                "assumption": lead_lag["assumption"],
             }
-            # Workaround for matplotlib tight_layout recursion bug in Python 3.14
-            try:
-                chart = chart_correlation(correlation["matrix"], charts_dir / "correlation.png")
-                if chart:
-                    charts["Корреляционная матрица"] = chart
-            except RecursionError:
-                pass
-            except Exception as e:
-                warnings.append(f"Ошибка построения графика корреляций: {e}")
+            p.headline.append(headline_row(
+                "Значимых лаговых связей (FDR < 0.05)", lead_lag["significant_count"], "шт.",
+                "macro_survey"))
+        else:
+            p.warnings.append(f"Лаговая причинность не рассчитана: {lead_lag.get('assumption', '')}")
 
-        if "html" in formats:
-            build_dashboard(survey, indicator, out_dir / "dashboard.html",
-                            title=f"Дашборд: {indicator}")
 
-        # --- Лаговые связи макропоказателей (--drivers) ---
-        if getattr(args, "drivers", False):
-            industry_frame = survey[survey["industry"] == industry]
-            lead_lag = macro_lead_lag(
-                industry_frame,
-                period_col="period" if "period" in industry_frame.columns else "period_start",
-                max_lag=getattr(args, "drivers_max_lag", 3),
-            )
-            if lead_lag.get("available"):
-                sections.append(("Макро: опережающие связи (Грейнджер)", lead_lag["links"],
-                                 lead_lag["assumption"]))
-                assumptions.append(lead_lag["assumption"])
-                metrics_payload["sections"]["macro_lead_lag"] = {
-                    "links": records(lead_lag["links"]),
-                    "max_lag_used": lead_lag["max_lag_used"],
-                    "periods_analyzed": lead_lag["periods_analyzed"],
-                    "significant_count": lead_lag["significant_count"],
-                    "assumption": lead_lag["assumption"],
-                }
-                headline.append(headline_row(
-                    "Значимых лаговых связей (FDR < 0.05)", lead_lag["significant_count"], "шт.",
-                    "macro_survey"))
-            else:
-                warnings.append(f"Лаговая причинность не рассчитана: {lead_lag.get('assumption', '')}")
-
-    # --- Рыночные таблицы (macro_*) --------------------------------------
+def _stage_macro_tables(p: _Pipeline) -> None:
+    """Раздел «Рыночные таблицы» (macro_*): структура, динамика, аномалии, графики."""
     macro_specs = {
         "macro_deposits": ("value_mln_rub", "category", "Вклады и депозиты"),
         "macro_loans": ("value_mln_rub", "category", "Кредитный портфель"),
@@ -954,7 +993,7 @@ def run(args: argparse.Namespace) -> int:
         "macro_securities": ("value_mln_rub", "instrument_type", "Ценные бумаги"),
     }
     for key, (value_col, group_col, title) in macro_specs.items():
-        table = tables.get(key)
+        table = p.tables.get(key)
         if table is None or value_col not in table.columns:
             continue
         table = normalize_periods(table).dropna(subset=["period_start"])
@@ -962,186 +1001,187 @@ def run(args: argparse.Namespace) -> int:
             continue
         if group_col and group_col in table.columns:
             structure = macro_structure(table, value_col, group_col)
-            sections.append((f"{title}: структура", structure, f"Источник: {key}"))
+            p.sections.append((f"{title}: структура", structure, f"Источник: {key}"))
         totals = table.groupby("period_start", as_index=False)[value_col].sum()
         dynamics = macro_dynamics(totals, value_col=value_col)
         view = dynamics.tail(36).assign(
             period_start=lambda d: period_labels(d["period_start"]))
         cols = [c for c in ("period_start", value_col, "change_pct", "yoy_pct") if c in view.columns]
-        sections.append((f"{title}: динамика", view[cols], ""))
+        p.sections.append((f"{title}: динамика", view[cols], ""))
         anomalies = macro_anomalies(table, value_col=value_col,
                                     group_cols=(group_col,) if group_col else ())
         if not anomalies.empty:
             view_a = anomalies.assign(
                 period_start=lambda d: period_labels(d["period_start"]))
             columns = [c for c in ("period_start", group_col, value_col, "_z") if c and c in view_a.columns]
-            sections.append((f"{title}: аномалии", view_a[columns], ""))
-        # Workaround for matplotlib tight_layout recursion bug in Python 3.14
-        try:
-            chart = chart_series(totals, value_col, "period_start",
-                                 charts_dir / f"{key}.png", title=f"{title}: динамика")
-            if chart:
-                charts[f"{title}: динамика"] = chart
-        except RecursionError:
-            pass
-        except Exception as e:
-            warnings.append(f"Ошибка построения графика {title}: {e}")
-        headline.append(headline_row(f"{title} (последнее)", totals[value_col].iloc[-1],
+            p.sections.append((f"{title}: аномалии", view_a[columns], ""))
+        _safe_chart(p, f"{title}: динамика", f"Ошибка построения графика {title}",
+                    lambda key=key, totals=totals, value_col=value_col, title=title:
+                    chart_series(totals, value_col, "period_start",
+                                 p.charts_dir / f"{key}.png", title=f"{title}: динамика"))
+        p.headline.append(headline_row(f"{title} (последнее)", totals[value_col].iloc[-1],
                                      "млн руб.", key))
-        metrics_payload["sections"][key] = {
+        p.metrics_payload["sections"][key] = {
             "rows": records(view), "anomalies": records(anomalies),
         }
 
-    # --- Сравнение двух выгрузок (--compare-dirs) ---
-    if getattr(args, "compare_dirs", None):
-        import secrets
-        base_dir = Path(args.compare_dirs[0])
-        target_dir = Path(args.compare_dirs[1])
-        label_base, label_target = args.labels
-        tables_base = load_tables(base_dir)
-        tables_target = load_tables(target_dir)
-        tables_base, _ = client_csv.normalize(tables_base)
-        tables_target, _ = client_csv.normalize(tables_target)
-        if pii_mode != "off":
-            shared_secret = secrets.token_hex(32)
-            tables_base, _ = sanitize_tables(tables_base, mode=pii_mode, secret_key=shared_secret)
-            tables_target, _ = sanitize_tables(tables_target, mode=pii_mode, secret_key=shared_secret)
-        comparison = compare_snapshots(tables_base, tables_target, label_base, label_target)
-        if comparison.get("available"):
-            sections.append((f"Сравнение срезов: {label_base} → {label_target}: схема",
-                             comparison["schema"]["table_summary"],
-                             comparison["assumption"]))
-            bridge = comparison["portfolio_bridge"]
-            if bridge.get("available"):
-                def _pct(value: object) -> str:
-                    return "—" if value is None else f"{float(value):.2f}%"
 
-                sections.append(("Сравнение: портфельный Bridge", bridge["bridge_table"],
-                                 f"Δ портфель: {bridge['balance_delta']:,.2f} ({_pct(bridge['balance_growth_pct'])}), "
-                                 f"Retention: {_pct(bridge['client_retention_pct'])}, "
-                                 f"NRR: {_pct(bridge['net_dollar_retention_pct'])}"))
-                headline.append(headline_row(
-                    f"Δ Портфель ({label_base}→{label_target})", bridge["balance_delta"], "руб.",
-                    "portfolio", digits=0
-                ))
-                headline.append(headline_row(
-                    "Client Retention", bridge["client_retention_pct"], "%",
-                    "portfolio"
-                ))
-                headline.append(headline_row(
-                    "Net Dollar Retention", bridge["net_dollar_retention_pct"], "%",
-                    "portfolio"
-                ))
-            if not comparison["finance_comparison"].empty:
-                sections.append(("Сравнение: P&L", comparison["finance_comparison"], ""))
+def _stage_comparison(p: _Pipeline) -> None:
+    """Раздел «Сравнение двух выгрузок» (--compare-dirs): схема, Bridge, P&L, PVM, PAR."""
+    if not getattr(p.args, "compare_dirs", None):
+        return
+    base_dir = Path(p.args.compare_dirs[0])
+    target_dir = Path(p.args.compare_dirs[1])
+    label_base, label_target = p.args.labels
+    tables_base = load_tables(base_dir)
+    tables_target = load_tables(target_dir)
+    tables_base, _ = client_csv.normalize(tables_base)
+    tables_target, _ = client_csv.normalize(tables_target)
+    if p.pii_mode != "off":
+        shared_secret = secrets.token_hex(32)
+        tables_base, _ = sanitize_tables(tables_base, mode=p.pii_mode, secret_key=shared_secret)
+        tables_target, _ = sanitize_tables(tables_target, mode=p.pii_mode, secret_key=shared_secret)
+    comparison = compare_snapshots(tables_base, tables_target, label_base, label_target)
+    if not comparison.get("available"):
+        return
+    p.sections.append((f"Сравнение срезов: {label_base} → {label_target}: схема",
+                     comparison["schema"]["table_summary"],
+                     comparison["assumption"]))
+    bridge = comparison["portfolio_bridge"]
+    if bridge.get("available"):
+        def _pct(value: object) -> str:
+            return "—" if value is None else f"{float(value):.2f}%"
 
-            # --- Факторный разбор отклонений (--drivers) ---
-            if getattr(args, "drivers", False):
-                pvm_base, pvm_segment = _pvm_input(tables_base)
-                pvm_target, _ = _pvm_input(tables_target)
-                if pvm_base is not None and pvm_target is not None:
-                    pvm = pvm_decomposition(
-                        pvm_base, pvm_target,
-                        segment_col=pvm_segment, volume_col="volume", value_col="revenue",
-                    )
-                    if pvm.get("available"):
-                        effects = pvm["effects"]
-                        frame = pd.DataFrame([
-                            {"Эффект": "Объём", "Вклад": effects["volume_effect"]},
-                            {"Эффект": "Продуктовый микс", "Вклад": effects["mix_effect"]},
-                            {"Эффект": "Ставка (цена)", "Вклад": effects["rate_effect"]},
-                            {"Эффект": "Взаимодействие", "Вклад": effects["interaction_effect"]},
-                            {"Эффект": "Итого изменение", "Вклад": pvm["total_delta"]},
-                        ])
-                        sections.append((f"Факторный разбор PVM ({label_base} → {label_target})",
-                                         frame, pvm["assumption"]))
-                        metrics_payload["sections"]["pvm"] = {
-                            "effects": pvm["effects"],
-                            "total_delta": pvm["total_delta"],
-                            "by_segment": records(pvm["by_segment"]),
-                            "assumption": pvm["assumption"],
-                        }
-                        headline.append(headline_row("PVM: вклад объёма", effects["volume_effect"],
-                                                    "руб.", "sales"))
-                        headline.append(headline_row("PVM: вклад ставки", effects["rate_effect"],
-                                                    "руб.", "sales"))
-                else:
-                    warnings.append("PVM-разбор пропущен: в выгрузках нет таблицы sales с суммой сделки.")
+        p.sections.append(("Сравнение: портфельный Bridge", bridge["bridge_table"],
+                         f"Δ портфель: {bridge['balance_delta']:,.2f} ({_pct(bridge['balance_growth_pct'])}), "
+                         f"Retention: {_pct(bridge['client_retention_pct'])}, "
+                         f"NRR: {_pct(bridge['net_dollar_retention_pct'])}"))
+        p.headline.append(headline_row(
+            f"Δ Портфель ({label_base}→{label_target})", bridge["balance_delta"], "руб.",
+            "portfolio", digits=0
+        ))
+        p.headline.append(headline_row(
+            "Client Retention", bridge["client_retention_pct"], "%",
+            "portfolio"
+        ))
+        p.headline.append(headline_row(
+            "Net Dollar Retention", bridge["net_dollar_retention_pct"], "%",
+            "portfolio"
+        ))
+    if not comparison["finance_comparison"].empty:
+        p.sections.append(("Сравнение: P&L", comparison["finance_comparison"], ""))
 
-                port_base = tables_base.get("portfolio")
-                if port_base is None:
-                    port_base = tables_base.get("accounts")
-                port_target = tables_target.get("portfolio")
-                if port_target is None:
-                    port_target = tables_target.get("accounts")
-                if port_base is not None and port_target is not None:
-                    par_shift = par_shift_decomposition(port_base, port_target)
-                    if par_shift.get("available"):
-                        frame = pd.DataFrame([
-                            {"Эффект": "Риск внутри продуктов", "Вклад, п.п.": par_shift["within_risk_effect_pp"]},
-                            {"Эффект": "Сдвиг структуры портфеля", "Вклад, п.п.": par_shift["structural_mix_effect_pp"]},
-                            {"Эффект": "Итого изменение PAR", "Вклад, п.п.": par_shift["delta_par_pp"]},
-                        ])
-                        sections.append((f"Разложение сдвига PAR ({label_base} → {label_target})",
-                                         frame, par_shift["assumption"]))
-                        metrics_payload["sections"]["par_shift"] = {
-                            "par_base_pct": par_shift["par_base_pct"],
-                            "par_target_pct": par_shift["par_target_pct"],
-                            "delta_par_pp": par_shift["delta_par_pp"],
-                            "within_risk_effect_pp": par_shift["within_risk_effect_pp"],
-                            "structural_mix_effect_pp": par_shift["structural_mix_effect_pp"],
-                            "by_segment": records(par_shift["by_segment"]),
-                            "assumption": par_shift["assumption"],
-                        }
-                        headline.append(headline_row("PAR: вклад риска внутри продуктов",
-                                                    par_shift["within_risk_effect_pp"], "п.п.",
-                                                    "portfolio.dpd"))
+    # --- Факторный разбор отклонений (--drivers) ---
+    if getattr(p.args, "drivers", False):
+        pvm_base, pvm_segment = _pvm_input(tables_base)
+        pvm_target, _ = _pvm_input(tables_target)
+        if pvm_base is not None and pvm_target is not None:
+            pvm = pvm_decomposition(
+                pvm_base, pvm_target,
+                segment_col=pvm_segment, volume_col="volume", value_col="revenue",
+            )
+            if pvm.get("available"):
+                effects = pvm["effects"]
+                frame = pd.DataFrame([
+                    {"Эффект": "Объём", "Вклад": effects["volume_effect"]},
+                    {"Эффект": "Продуктовый микс", "Вклад": effects["mix_effect"]},
+                    {"Эффект": "Ставка (цена)", "Вклад": effects["rate_effect"]},
+                    {"Эффект": "Взаимодействие", "Вклад": effects["interaction_effect"]},
+                    {"Эффект": "Итого изменение", "Вклад": pvm["total_delta"]},
+                ])
+                p.sections.append((f"Факторный разбор PVM ({label_base} → {label_target})",
+                                 frame, pvm["assumption"]))
+                p.metrics_payload["sections"]["pvm"] = {
+                    "effects": pvm["effects"],
+                    "total_delta": pvm["total_delta"],
+                    "by_segment": records(pvm["by_segment"]),
+                    "assumption": pvm["assumption"],
+                }
+                p.headline.append(headline_row("PVM: вклад объёма", effects["volume_effect"],
+                                            "руб.", "sales"))
+                p.headline.append(headline_row("PVM: вклад ставки", effects["rate_effect"],
+                                            "руб.", "sales"))
+        else:
+            p.warnings.append("PVM-разбор пропущен: в выгрузках нет таблицы sales с суммой сделки.")
 
-            metrics_payload["sections"]["comparison"] = {
-                "labels": comparison["labels"],
-                "schema": {k: records(v) if hasattr(v, "to_dict") else v
-                           for k, v in comparison["schema"].items()},
-                "portfolio_bridge": {k: records(v) if hasattr(v, "to_dict") else v
-                                      for k, v in bridge.items()},
-                "finance_comparison": records(comparison["finance_comparison"]),
-                "assumption": comparison["assumption"],
-            }
+        port_base = tables_base.get("portfolio")
+        if port_base is None:
+            port_base = tables_base.get("accounts")
+        port_target = tables_target.get("portfolio")
+        if port_target is None:
+            port_target = tables_target.get("accounts")
+        if port_base is not None and port_target is not None:
+            par_shift = par_shift_decomposition(port_base, port_target)
+            if par_shift.get("available"):
+                frame = pd.DataFrame([
+                    {"Эффект": "Риск внутри продуктов", "Вклад, п.п.": par_shift["within_risk_effect_pp"]},
+                    {"Эффект": "Сдвиг структуры портфеля", "Вклад, п.п.": par_shift["structural_mix_effect_pp"]},
+                    {"Эффект": "Итого изменение PAR", "Вклад, п.п.": par_shift["delta_par_pp"]},
+                ])
+                p.sections.append((f"Разложение сдвига PAR ({label_base} → {label_target})",
+                                 frame, par_shift["assumption"]))
+                p.metrics_payload["sections"]["par_shift"] = {
+                    "par_base_pct": par_shift["par_base_pct"],
+                    "par_target_pct": par_shift["par_target_pct"],
+                    "delta_par_pp": par_shift["delta_par_pp"],
+                    "within_risk_effect_pp": par_shift["within_risk_effect_pp"],
+                    "structural_mix_effect_pp": par_shift["structural_mix_effect_pp"],
+                    "by_segment": records(par_shift["by_segment"]),
+                    "assumption": par_shift["assumption"],
+                }
+                p.headline.append(headline_row("PAR: вклад риска внутри продуктов",
+                                            par_shift["within_risk_effect_pp"], "п.п.",
+                                            "portfolio.dpd"))
 
-    # --- Плоские метрики --------------------------------------------------
+    p.metrics_payload["sections"]["comparison"] = {
+        "labels": comparison["labels"],
+        "schema": {k: records(v) if hasattr(v, "to_dict") else v
+                   for k, v in comparison["schema"].items()},
+        "portfolio_bridge": {k: records(v) if hasattr(v, "to_dict") else v
+                              for k, v in bridge.items()},
+        "finance_comparison": records(comparison["finance_comparison"]),
+        "assumption": comparison["assumption"],
+    }
+
+
+def _stage_metrics(p: _Pipeline) -> None:
+    """Плоские метрики: metrics.json и metrics.csv для сверки значений."""
     # metrics.csv — плоский список чисел для сверки: разделы, ключевые
-    # показатели (raw, а не форматированная строка) и юнит-экономика.
-    metric_rows = flatten_metrics(sections)
-    metric_rows += headline_rows(headline)
-    metric_rows += flat_values("Юнит-экономика", unit)
-    metrics_payload["metrics"] = metric_rows
-    metrics_payload["headline"] = headline
-    metrics_payload["notes"] = notes
-    (out_dir / "metrics.json").write_text(
-        json.dumps(json_ready(metrics_payload), ensure_ascii=False, indent=2, allow_nan=False),
+    # показатели (raw, а не отформатированная строка) и юнит-экономика.
+    metric_rows = flatten_metrics(p.sections)
+    metric_rows += headline_rows(p.headline)
+    metric_rows += flat_values("Юнит-экономика", p.unit)
+    p.metrics_payload["metrics"] = metric_rows
+    p.metrics_payload["headline"] = p.headline
+    p.metrics_payload["notes"] = p.notes
+    (p.out_dir / "metrics.json").write_text(
+        json.dumps(json_ready(p.metrics_payload), ensure_ascii=False, indent=2, allow_nan=False),
         encoding="utf-8")
     pd.DataFrame(metric_rows, columns=["section", "metric", "dimension", "value"]).to_csv(
-        out_dir / "metrics.csv", index=False, encoding="utf-8-sig")
+        p.out_dir / "metrics.csv", index=False, encoding="utf-8-sig")
 
-    # --- Отчёты -----------------------------------------------------------
+
+def _stage_reports(p: _Pipeline) -> None:
+    """Финальные отчёты: DOCX/PDF/XLSX/PPTX/RTF, HTML-версия и итоговый лог."""
     report = ReportData(
-        title=args.title,
-        subtitle=f"Источник: {data_dir.name}",
-        headline=headline,
-        assumptions=assumptions,
-        notes=notes,
-        warnings=warnings,
-        sections=sections,
-        quality=quality_frame(quality),
-        charts=charts,
-        meta=dict(metrics_payload["meta"]),
+        title=p.args.title,
+        subtitle=f"Источник: {p.data_dir.name}",
+        headline=p.headline,
+        assumptions=p.assumptions,
+        notes=p.notes,
+        warnings=p.warnings,
+        sections=p.sections,
+        quality=quality_frame(p.quality),
+        charts=p.charts,
+        meta=dict(p.metrics_payload["meta"]),
     )
-    created = write_reports(report, out_dir, [f for f in formats if f != "html"])
+    created = write_reports(report, p.out_dir, [f for f in p.formats if f != "html"])
 
-    if "html" in formats:
-        dashboard_path = out_dir / "dashboard.html"
-        html_path = out_dir / "report.html"
+    if "html" in p.formats:
+        dashboard_path = p.out_dir / "dashboard.html"
+        html_path = p.out_dir / "report.html"
         has_client_sections = any(
-            k in metrics_payload["sections"] for k in ("portfolio", "funnel", "finance", "comparison")
+            k in p.metrics_payload["sections"] for k in ("portfolio", "funnel", "finance", "comparison")
         )
         if dashboard_path.exists() and not has_client_sections:
             dashboard_path.replace(html_path)
@@ -1149,14 +1189,36 @@ def run(args: argparse.Namespace) -> int:
             write_html(report, html_path)
         created["html"] = html_path
 
-    log(args, "")
-    log(args, "Готово:")
+    log(p.args, "")
+    log(p.args, "Готово:")
     for name, path in created.items():
-        log(args, f"  {name:5s} {path}")
-    log(args, f"  json  {out_dir / 'metrics.json'}")
-    log(args, f"  csv   {out_dir / 'metrics.csv'}")
-    if warnings:
-        log(args, f"Предупреждений: {len(warnings)} (см. metrics.json → warnings)")
+        log(p.args, f"  {name:5s} {path}")
+    log(p.args, f"  json  {p.out_dir / 'metrics.json'}")
+    log(p.args, f"  csv   {p.out_dir / 'metrics.csv'}")
+    if p.warnings:
+        log(p.args, f"Предупреждений: {len(p.warnings)} (см. metrics.json → warnings)")
+
+
+def run(args: argparse.Namespace) -> int:
+    """Конвейер отчёта: подготовка → загрузка → контроль качества → разделы → отчёты."""
+    data_dir, out_dir, charts_dir, formats = _prepare_dirs(args)
+    p = _Pipeline(args=args, data_dir=data_dir, out_dir=out_dir,
+                  charts_dir=charts_dir, formats=formats)
+    _stage_load(p)
+    _stage_ab_test(p)
+    _stage_quality(p)
+    p.warnings = list(p.quality.warnings)
+    _init_metrics_payload(p)
+    _stage_portfolio(p)
+    _stage_funnel(p)
+    _stage_ab_report(p)
+    _stage_segmentation(p)
+    _stage_finance(p)
+    _stage_macro(p)
+    _stage_macro_tables(p)
+    _stage_comparison(p)
+    _stage_metrics(p)
+    _stage_reports(p)
     return 0
 
 

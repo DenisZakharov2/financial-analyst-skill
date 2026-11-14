@@ -1,7 +1,7 @@
 ---
 name: financial-analyst
 description: "Финансовый аналитик для банков, финтеха и смежных сфер: портфель и PAR/NPL, P&L и bridge-сравнение двух выгрузок, воронка и поэтапный TAT с SLA, юнит-экономика (CAC, ARPU, LTV), прогноз, A/B-пилоты и сегментация RFM, макро-опросы ЦБ РФ, защита ПДн и отчёты DOCX, PDF, XLSX, PPTX, RTF, HTML."
-version: 2.1.1
+version: 2.1.2
 author: Denis Zakharov (@DenisZakharov2), Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]

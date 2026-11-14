@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import math
 import os
 import re
 import secrets
@@ -144,7 +145,7 @@ def _checksum_threshold(sample_size: int) -> int:
     """
     if sample_size <= 0:
         return 3
-    return max(3, int(-(-CHECKSUM_CONTENT_THRESHOLD * sample_size // 1)))
+    return max(3, math.ceil(CHECKSUM_CONTENT_THRESHOLD * sample_size))
 
 
 @dataclass(frozen=True)
@@ -240,9 +241,12 @@ def _detect_series_pii_type(series: pd.Series, col_name: str) -> tuple[str | Non
     if norm_col in SAFE_CODE_COLUMNS:
         return None, 0
 
+    # Сэмпл до 500 значений по всей колонке, а не только голова и хвост:
+    # блок ПДн в середине таблицы тоже должен находиться. Сэмпл детерминирован
+    # (random_state=0), чтобы повторный прогон давал тот же вердикт.
     sample = non_null
     if len(sample) > 500:
-        sample = pd.concat([non_null.head(250), non_null.tail(250)], ignore_index=True)
+        sample = non_null.sample(500, random_state=0)
     # Порог по содержимому: прежние 30 % (50 % для ИНН) пропускали колонки,
     # где ПДн заполнены у 5–20 % клиентов. Для email и телефона (надёжный
     # шаблон) достаточно 5 % выборки; для ФИО, СНИЛС, карт и ИНН пороги выше —
@@ -403,7 +407,8 @@ def sanitize_tables(
                 norm_col = str(col).strip().lower()
                 if norm_col in JOIN_KEY_COLUMNS:
                     prefix = prefix_map.get(norm_col, "ID")
-                    # Avoid .map() which triggers segfault in pandas 2.2.3/numpy 2.1.3
+                    # Без .map(): на связке pandas 2.2.3 / numpy 2.x он приводит
+                    # к segfault, поэтому токен считается построчно.
                     out_df[col] = [_hmac_token(v, key_bytes, prefix) for v in out_df[col]]
                     pseudonymized_cols.append(f"{table_name}.{col}")
 

@@ -722,16 +722,7 @@ def forecast_trend(series: pd.DataFrame, value_col: str = "value",
     # после чего `or 30` подставляет месячный горизонт.
     gaps = np.diff(data["_dt"].to_numpy()).astype("timedelta64[D]").astype(float)
     day_step = float(np.median(gaps)) if len(gaps) else 30.0
-    if day_step >= 300:
-        step_months = 12
-    elif day_step >= 170:
-        step_months = 6
-    elif day_step >= 80:
-        step_months = 3
-    elif day_step >= 27:
-        step_months = 1
-    else:
-        step_months = 0
+    step_months = _step_months_from_days(day_step)
     if step_months > 0:
         future = [
             _add_months_to_ym(last_dt.strftime("%Y-%m"), step_months * (i + 1))
@@ -780,15 +771,24 @@ def _add_months_to_ym(ym_str: str, months: int) -> str:
         return ym_str
 
 
+def _step_months_from_days(day_step: float) -> int:
+    """Шаг сетки прогноза в месяцах по медианному интервалу между периодами.
+
+    Единственный источник порогов: используется и линейным трендом, и
+    каскадным прогнозом. 0 — дневной/недельный шаг, горизонт считается в днях.
+    """
+    if day_step >= 300:
+        return 12
+    if day_step >= 170:
+        return 6
+    if day_step >= 80:
+        return 3
+    if day_step >= 27:
+        return 1
+    return 0
+
+
 def _infer_step_months(periods: pd.Series) -> int:
     """Return step in months (1, 3, 6, 12, or 0 for daily/weekly)."""
     days = _median_step_days(periods) or 30.0
-    if days >= 300:
-        return 12
-    if days >= 170:
-        return 6
-    if days >= 80:
-        return 3
-    if days >= 27:
-        return 1
-    return 0  # daily/weekly - not used for monthly forecasting
+    return _step_months_from_days(days)
