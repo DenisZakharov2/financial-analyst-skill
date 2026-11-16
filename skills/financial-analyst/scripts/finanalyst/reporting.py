@@ -368,9 +368,9 @@ def write_docx(report: ReportData, path: Path) -> Path:
             table.style = "Table Grid"
         for cell, column in zip(table.rows[0].cells, view.columns):
             cell.text = str(column)
-        for _, row in view.iterrows():
+        for row in view.itertuples(index=False):
             cells = table.add_row().cells
-            for position, (cell, value) in enumerate(zip(cells, row.values)):
+            for position, (cell, value) in enumerate(zip(cells, row)):
                 cell.text = str(value)
                 if position in numeric:
                     cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.RIGHT
@@ -387,9 +387,9 @@ def write_docx(report: ReportData, path: Path) -> Path:
         table.style = "Table Grid"
         for cell, column in zip(table.rows[0].cells, view.columns):
             cell.text = str(column)
-        for _, row in view.iterrows():
+        for row in view.itertuples(index=False):
             cells = table.add_row().cells
-            for cell, value in zip(cells, row.values):
+            for cell, value in zip(cells, row._asdict().values()):
                 cell.text = str(value)
 
     for name, chart in report.charts.items():
@@ -611,9 +611,10 @@ def write_xlsx(report: ReportData, path: Path) -> Path:
             cell.font = Font(bold=True)
             cell.fill = PatternFill("solid", start_color="F3F4F6")
             cell.alignment = Alignment(vertical="center", wrap_text=True)
-        for i, (_, source_row) in enumerate(frame.iterrows(), start=start + 1):
+        for i, source_row in enumerate(frame.itertuples(index=False), start=start + 1):
             for j, column in enumerate(frame.columns, start=1):
-                value = source_row[column]
+                col_idx = frame.columns.get_loc(column)
+                value = source_row[col_idx]
                 if isinstance(value, (np.integer,)):
                     value = int(value)
                 elif isinstance(value, (np.floating,)):
@@ -648,9 +649,10 @@ def write_xlsx(report: ReportData, path: Path) -> Path:
         for j, column in enumerate(view.columns, start=1):
             cell = ws.cell(row=1, column=j, value=column_title(column))
             cell.font = Font(bold=True)
-        for i, (_, source_row) in enumerate(view.iterrows(), start=2):
+        for i, source_row in enumerate(view.itertuples(index=False), start=2):
             for j, column in enumerate(view.columns, start=1):
-                ws.cell(row=i, column=j, value=str(source_row[column]))
+                col_idx = view.columns.get_loc(column)
+                ws.cell(row=i, column=j, value=str(source_row[col_idx]))
 
     workbook.save(str(path))
     return path
@@ -729,9 +731,10 @@ def write_pptx(report: ReportData, path: Path) -> Path:
             for paragraph in table.cell(0, j).text_frame.paragraphs:
                 paragraph.font.size = Pt(10)
                 paragraph.font.bold = True
-        for i, (_, source_row) in enumerate(frame.head(rows - 1).iterrows(), start=1):
+        for i, source_row in enumerate(frame.head(rows - 1).itertuples(index=False), start=1):
             for j, column in enumerate(frame.columns[:columns]):
-                table.cell(i, j).text = _fmt_cell(source_row[column], column)
+                col_idx = frame.columns[:columns].get_loc(column)
+                table.cell(i, j).text = _fmt_cell(source_row[col_idx], column)
                 for paragraph in table.cell(i, j).text_frame.paragraphs:
                     paragraph.font.size = Pt(9)
                     if j in numeric:
