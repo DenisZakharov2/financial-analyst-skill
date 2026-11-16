@@ -209,15 +209,19 @@ def flatten_metrics(sections: list[tuple[str, pd.DataFrame, str]]) -> list[dict]
             continue
         numeric = frame.select_dtypes(include=[np.number]).columns
         dimension = frame.columns[0] if len(frame.columns) else None
-        for _, row in frame.iterrows():
-            for column in numeric:
-                value = row[column]
+        dimension_idx = 0 if dimension else None
+        for row in frame.itertuples(index=False):
+            for col_idx, column in enumerate(frame.columns):
+                if column not in numeric:
+                    continue
+                value = row[col_idx]
                 if pd.isna(value):
                     continue
+                dim_value = str(row[dimension_idx]) if dimension_idx is not None else ""
                 rows.append({
                     "section": name,
                     "metric": column,
-                    "dimension": str(row[dimension]) if dimension else "",
+                    "dimension": dim_value,
                     "value": float(value) if isinstance(value, (float, np.floating)) else value,
                 })
     return rows
