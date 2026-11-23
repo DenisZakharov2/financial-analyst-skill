@@ -76,12 +76,10 @@
 - CI: ruff + pytest на 3.10/3.12, self-check `check_skill.py`
 
 ### Не сделано / в работе
-- [x] Удалить segfault-комментарии (6 файлов)
-- [x] Добавить mypy в `.github/workflows/ci.yml`
-- [x] Объединить `period_grain` / `_months_in_periods` в `core.py`
-- [x] Интеграционные тесты: `test_cli_full_combinations.py`
-- [x] Когортный LTV / retention (новый модуль `finanalyst/cohorts.py`) — модуль и тесты готовы, CLI-флаг в следующей сессии
-- [ ] Structured insights в `metrics.json`
+- [ ] Structured insights в `metrics.json` (раздел «Наблюдения»: тип, драйвер, вклад в %)
+- [ ] CLI-флаг `--cohort` + раздел когорт в `metrics.json` (модуль `finanalyst/cohorts.py` и тесты готовы)
+
+---\n\n## Итог сессии 2026-11-23\n\nСделано по плану (ponytail, минимальные изменения):\n- Удалены segfault-комментарии из 6 файлов (`pii.py`, `cli.py`, `reporting.py`, `core.py`, `metrics.py`, `visuals.py`).\n- `mypy --ignore-missing-imports` добавлен в CI и dev-зависимости; код mypy-чистый (0 ошибок, 17 файлов).\n- `period_grain` / `_months_in_periods` объединены в `core.period_step(kind)`; `PERIOD_MONTHS` удалён из `metrics.py`.\n- Написаны 3 интеграционных теста (`tests/test_cli_full_combinations.py`) на комбинации флагов CLI с проверкой структуры `metrics.json` и тождеств PVM / сдвига PAR.\n- Начат когортный LTV / retention: `finanalyst/cohorts.py` + `tests/test_cohorts.py` (модуль и тесты готовы, CLI-флаг — в следующей сессии).\n- Версия 2.1.4 (фикс CI mypy под Python 3.10 в `drivers.py`), везде синхронно: `pyproject.toml`, `SKILL.md`, `__init__.py`, CHANGELOG, git tag `v2.1.4`, GitHub Release.\n\nCI: зелёно (обе матрицы 3.10 и 3.12, все шаги включая mypy, lint, тесты, self-check). Локально: 192 тестов passed, ruff чист, mypy 0 проблем.\n\nРелизы:\n- v2.1.3 — https://github.com/DenisZakharov2/financial-analyst-skill/releases/tag/v2.1.3 (сломан mypy под 3.10, фикс в 2.1.4)\n- v2.1.4 — https://github.com/DenisZakharov2/financial-analyst-skill/releases/tag/v2.1.4 (текущий)\n\nПромт для новой сессии:\n> **Задача:** Продолжить разработку financial-analyst-skill (v2.1.4).\n> **Контекст:** Репозиторий в `/home/anony/Documents/Личное/Проект приложения для аналитика/financial-analyst-skill/`. HEAD = a9a56d5 (v2.1.4, CI зелёное, релиз v2.1.4 создан).\n> **План следующей сессии (по приоритету):**\n> 1. Structured insights в `metrics.json` — блок наблюдений (`insights: [{type, driver, contribution_pct, ...}]`) для агентских выводов.\n> 2. CLI-флаг `--cohort` + раздел когорт в `metrics.json` (модуль `finanalyst/cohorts.py`, тесты `tests/test_cohorts.py` уже готовы).\n> **Стиль:** ponytail (минимальные изменения, валидация/безопасность не резать). Запускать тесты после каждого шага.\n> **Ожидаемый результат:** чистый diff, все тесты зелёные, mypy проходит, CHANGELOG обновлён.
 
 ---
 
