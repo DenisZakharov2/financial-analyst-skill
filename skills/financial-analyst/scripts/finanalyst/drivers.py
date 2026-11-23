@@ -214,8 +214,8 @@ def _granger_f_test(x: np.ndarray, y: np.ndarray, lag: int) -> tuple[float, floa
         return 0.0, 1.0
 
     y_target = y[lag:]
-    r_cols = [np.ones(eff_n)]
-    u_cols = [np.ones(eff_n)]
+    r_cols: list[np.ndarray] = [np.ones(eff_n)]
+    u_cols: list[np.ndarray] = [np.ones(eff_n)]
     for k in range(1, lag + 1):
         y_lag = y[lag - k: n - k]
         x_lag = x[lag - k: n - k]
