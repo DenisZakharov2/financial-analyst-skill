@@ -62,7 +62,9 @@ def portfolio_bridge(
             }
 
     b, _ = drop_total_rows(portfolio_base.copy(), group=())
+    assert b is not None
     t, _ = drop_total_rows(portfolio_target.copy(), group=())
+    assert t is not None
     if "status" in b.columns:
         b = b[b["status"].astype(str).str.strip().str.lower() != "закрыт"]
     if "status" in t.columns:
@@ -174,7 +176,9 @@ def compare_snapshots(
     fin_deltas: list[dict] = []
     if fin_b is not None and fin_t is not None and not fin_b.empty and not fin_t.empty:
         fin_b_clean, _ = drop_total_rows(fin_b, group=("period",) if "period" in fin_b.columns else ())
+        assert fin_b_clean is not None
         fin_t_clean, _ = drop_total_rows(fin_t, group=("period",) if "period" in fin_t.columns else ())
+        assert fin_t_clean is not None
         num_cols = [
             c
             for c in (

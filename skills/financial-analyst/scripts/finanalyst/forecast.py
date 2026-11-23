@@ -14,8 +14,6 @@ RMSE, sMAPE и MASE — MAPE не определён при нулевых фа�
 
 from __future__ import annotations
 
-from typing import Literal
-
 import numpy as np
 import pandas as pd
 
@@ -57,7 +55,11 @@ def _fit_predict_damped_holt(
         return _fit_predict_linear(y_train, h)
 
     use_seasonal = seasonal_period is not None and n >= 2 * seasonal_period
-    m = int(seasonal_period) if use_seasonal else 1
+    if use_seasonal:
+        assert seasonal_period is not None
+        m = int(seasonal_period)
+    else:
+        m = 1
 
     def _simulate(params: np.ndarray) -> tuple[np.ndarray, float, float, np.ndarray]:
         alpha, beta, phi = params[0], params[1], params[2]
@@ -135,6 +137,7 @@ def _fit_predict_arx(
         and len(exog_future) >= h
     )
     if has_exog:
+        assert exog_train is not None and exog_future is not None
         features.append(np.asarray(exog_train[1:], dtype=float))
 
     X = np.column_stack(features)
@@ -147,7 +150,8 @@ def _fit_predict_arx(
     for step in range(h):
         row = [1.0, float(n + step), last_y]
         if has_exog:
-            row.extend(np.asarray(exog_future[step], dtype=float).ravel().tolist())
+            assert exog_future is not None
+            row.extend(np.asarray([exog_future[step]], dtype=float).ravel().tolist())
         pred = float(np.dot(np.asarray(row, dtype=float), weights))
         preds[step] = pred
         last_y = pred
@@ -197,7 +201,7 @@ def forecast_advanced(
     period_col: str = "period_start",
     horizon: int = 4,
     band: float = 1.0,
-    method: Literal["auto", "linear", "ets", "arx"] = "auto",
+    method: str = "auto",
     exog_cols: list[str] | None = None,
     future_exog: pd.DataFrame | None = None,
 ) -> dict:

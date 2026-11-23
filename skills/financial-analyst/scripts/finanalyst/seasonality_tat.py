@@ -313,6 +313,7 @@ def funnel_tat(
     app_result = np.full(app_span_n, "", dtype=object)
     has_sales = sales is not None and not sales.empty and entity_col in sales.columns
     if has_sales:
+        assert sales is not None
         sales_cols = [c for c in (entity_col, "manager_id", "result") if c in sales.columns]
         if len(sales_cols) > 1:
             sales_meta = sales[sales_cols].drop_duplicates(subset=[entity_col])

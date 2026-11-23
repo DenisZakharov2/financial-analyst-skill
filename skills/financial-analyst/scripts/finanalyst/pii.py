@@ -15,7 +15,6 @@ import os
 import re
 import secrets
 from dataclasses import dataclass
-from typing import Literal
 
 import numpy as np
 import pandas as pd
@@ -252,7 +251,6 @@ def _detect_series_pii_type(series: pd.Series, col_name: str) -> tuple[str | Non
     # шаблон) достаточно 5 % выборки; для ФИО, СНИЛС, карт и ИНН пороги выше —
     # см. функции _pii_threshold, _fio_threshold, _snils_threshold,
     # _checksum_threshold.
-    # Avoid .map() which triggers segfault in pandas 2.2.3/numpy 2.1.3
     email_hits = int(sum(bool(EMAIL_RE.match(x)) for x in sample))
     if email_hits >= _pii_threshold(len(sample)):
         return "email", email_hits
@@ -330,7 +328,7 @@ def _hmac_token(value: object, key_bytes: bytes, prefix: str) -> object:
 
 def sanitize_tables(
     tables: dict[str, pd.DataFrame],
-    mode: Literal["strict", "redact", "off"] = "strict",
+    mode: str = "strict",
     secret_key: str | None = None,
     pseudonymize_keys: bool = True,
 ) -> tuple[dict[str, pd.DataFrame], dict]:
@@ -407,8 +405,6 @@ def sanitize_tables(
                 norm_col = str(col).strip().lower()
                 if norm_col in JOIN_KEY_COLUMNS:
                     prefix = prefix_map.get(norm_col, "ID")
-                    # Без .map(): на связке pandas 2.2.3 / numpy 2.x он приводит
-                    # к segfault, поэтому токен считается построчно.
                     out_df[col] = [_hmac_token(v, key_bytes, prefix) for v in out_df[col]]
                     pseudonymized_cols.append(f"{table_name}.{col}")
 

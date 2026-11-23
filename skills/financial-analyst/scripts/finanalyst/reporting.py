@@ -242,7 +242,6 @@ def _fmt_pct(value, digits: int = 2) -> str:
 
 
 def _fmt_cell(value, column: str = "") -> str:
-    # Handle pandas Timestamp without calling strftime (segfault risk)
     if hasattr(value, 'strftime') and hasattr(value, 'year') and hasattr(value, 'month') and hasattr(value, 'day'):
         try:
             return f"{int(value.day):02d}.{int(value.month):02d}.{int(value.year):04d}"
@@ -263,7 +262,6 @@ def _table_for_output(df: pd.DataFrame) -> pd.DataFrame:
     """Привести таблицу к строкам для DOCX/PDF/PPTX (без потери чисел в XLSX)."""
     out = df.copy()
     for column in out.columns:
-        # Avoid .map() which triggers segfault in pandas 2.2.3/numpy 2.1.3
         out[column] = [_fmt_cell(value, column) for value in out[column]]
     out.columns = [column_title(column) for column in out.columns]
     return out
@@ -344,13 +342,13 @@ def write_docx(report: ReportData, path: Path) -> Path:
 
     if report.notes:
         document.add_heading("Источник данных", level=1)
-        for item in report.notes:
-            document.add_paragraph(item, style="List Bullet")
+        for note in report.notes:
+            document.add_paragraph(note, style="List Bullet")
 
     if report.assumptions:
         document.add_heading("Допущения", level=1)
-        for item in report.assumptions:
-            document.add_paragraph(item, style="List Bullet")
+        for assumption in report.assumptions:
+            document.add_paragraph(assumption, style="List Bullet")
 
     for name, frame, note in report.sections:
         document.add_heading(name, level=1)
@@ -377,8 +375,8 @@ def write_docx(report: ReportData, path: Path) -> Path:
 
     if report.warnings:
         document.add_heading("Ограничения и предупреждения", level=1)
-        for item in report.warnings:
-            document.add_paragraph(item, style="List Bullet")
+        for warning in report.warnings:
+            document.add_paragraph(warning, style="List Bullet")
 
     if report.quality is not None and not report.quality.empty:
         document.add_heading("Контроль качества данных", level=1)

@@ -149,6 +149,7 @@ def par_shift_decomposition(
 
     def _prep(frame: pd.DataFrame) -> pd.DataFrame:
         tmp, _ = drop_total_rows(frame, group=())
+        assert tmp is not None
         tmp = tmp.copy()
         tmp["bal"] = pd.to_numeric(tmp["balance"], errors="coerce").fillna(0.0)
         tmp["dpd_num"] = pd.to_numeric(tmp["dpd"], errors="coerce").fillna(0.0)

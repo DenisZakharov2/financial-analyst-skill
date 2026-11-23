@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.1.3 — 2026-11-23
+
+По аудиту v2.1.2 (`CODE_REVIEW_REPORT.md`).
+
+**Исправлено**
+
+- Устаревшие комментарии про segfault pandas 2.2.3/numpy 2.1.3 удалены из `pii.py`, `cli.py`, `reporting.py`, `core.py`, `metrics.py`, `visuals.py` — на текущих версиях проблема не воспроизводится, комментарии только вводили в заблуждение.
+
+**Добавлено**
+
+- `mypy --ignore-missing-imports` в CI (старых ошибок в коде больше нет, новые блокируют прогон) и в dev-зависимости `pyproject.toml`.
+- `finanalyst.core.period_step(kind)` — единственный источник «месяцев на зерно периода» (M=1, Q=3, Y=12, D=1); `PERIOD_MONTHS` убран из `metrics.py`, `_months_in_periods` считается через общую функцию.
+- Интеграционные тесты `tests/test_cli_full_combinations.py` на комбинации флагов CLI с проверкой структуры `metrics.json`.
+- `finanalyst/cohorts.py` — старт когорты (первый продукт из портфеля, иначе registration_date) и retention-кривые по возрасту в месяцах по соглашениям из `references/cohorts.md`; CLI-флаг — в следующей сессии.
+
 ## 2.1.2 — 2026-11-14
 
 Исправления по код-ревью (см. `CODE_REVIEW.md`): надёжность, дублирование и читаемость.

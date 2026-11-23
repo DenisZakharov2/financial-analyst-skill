@@ -76,11 +76,11 @@
 - CI: ruff + pytest на 3.10/3.12, self-check `check_skill.py`
 
 ### Не сделано / в работе
-- [ ] Удалить segfault-комментарии (6 файлов)
-- [ ] Добавить mypy в `.github/workflows/ci.yml`
-- [ ] Объединить `period_grain` / `_months_in_periods` в `core.py`
-- [ ] Интеграционные тесты: `test_cli_full_combinations.py`
-- [ ] Когортный LTV / retention (новый модуль `finanalyst/cohorts.py`)
+- [x] Удалить segfault-комментарии (6 файлов)
+- [x] Добавить mypy в `.github/workflows/ci.yml`
+- [x] Объединить `period_grain` / `_months_in_periods` в `core.py`
+- [x] Интеграционные тесты: `test_cli_full_combinations.py`
+- [x] Когортный LTV / retention (новый модуль `finanalyst/cohorts.py`) — модуль и тесты готовы, CLI-флаг в следующей сессии
 - [ ] Structured insights в `metrics.json`
 
 ---

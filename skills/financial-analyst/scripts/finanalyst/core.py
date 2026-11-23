@@ -184,7 +184,6 @@ def _period_to_ym(period_tuple: tuple[pd.Timestamp | pd.NaT, str]) -> str:
     start, _ = period_tuple
     if pd.isna(start):
         return ""
-    # Use year/month attributes directly to avoid strftime/to_period segfault
     try:
         return f"{int(start.year):04d}-{int(start.month):02d}"
     except (AttributeError, ValueError):
@@ -288,6 +287,16 @@ def period_grain(values) -> str:
     return "M"
 
 
+def period_step(kind: str) -> int:
+    """Сколько календарных месяцев покрывает период зерна ``kind``.
+
+    ``M`` — месяц (1), ``Q`` — квартал (3), ``Y`` — год (12), ``D`` — день (1).
+    Единый источник перевода зерна в месяцы: ``metrics._months_in_periods`` и
+    сдвиг конца периода считаются через него, а не через локальные словари.
+    """
+    return {"M": 1, "Q": 3, "Y": 12, "D": 1}.get(kind, 1)
+
+
 def period_ym(value) -> str:
     """Месячный бакет периода ``YYYY-MM`` — ключ для агрегации и графиков."""
     start, _ = parse_period(value)
@@ -331,11 +340,8 @@ def normalize_periods(df: pd.DataFrame, column: str = "period") -> pd.DataFrame:
     if column not in df.columns:
         return df.copy()
     result = df.copy()
-    # Avoid .map() which triggers segfault in pandas 2.2.3/numpy 2.1.3
     pairs = [parse_period(v) for v in result[column]]
     grain = period_grain(result[column])
-    # Храним period_start как строку YYYY-MM, а не Timestamp,
-    # чтобы избежать segfault в pandas 2.2.3 при sort_values/dropna на datetime64
     # Используем pd.NA для невозможных дат, чтобы isna() работала корректно
     result["period_start"] = [
         _period_to_ym(p) if pd.notna(p[0]) else pd.NA
@@ -366,8 +372,7 @@ _PERIOD_FORMATS = {
 def _format_period(ts: pd.Timestamp, fmt: str) -> str:
     """Отформатировать дату периода.
 
-    Частые форматы считаются вручную: ``strftime`` в pandas 2.2.3 при numpy 2.x
-    приводил к падению процесса, а не к исключению.
+    Частые форматы считаются вручную, без ``strftime`` — стабильнее на новых версиях pandas.
     """
     template = _PERIOD_FORMATS.get(fmt)
     if template is None:
@@ -392,7 +397,6 @@ def period_labels(values: pd.Series, fmt: str = "%Y-%m") -> pd.Series:
     или текстом (готовая длинная таблица), поэтому дата приводится через парсинг
     строк, а неразобранный текст остаётся как есть.
     """
-    # Avoid pd.to_datetime which triggers segfault in pandas 2.2.3/numpy 2.1.3
     out = []
     for v in values:
         if pd.isna(v):
@@ -603,10 +607,10 @@ def validate_inputs(tables: dict[str, pd.DataFrame]) -> QualityReport:
                        f"Отрицательных остатков: {negatives}", warn_only=True)
         dpd = _numeric(portfolio, "dpd")
         if len(dpd):
-            missing = int(dpd.isna().sum())
-            if missing:
+            dpd_missing = int(dpd.isna().sum())
+            if dpd_missing:
                 report.add("portfolio_dpd_missing", False,
-                           f"Пропусков dpd: {missing}; в расчёте считаются нулевой просрочкой.",
+                           f"Пропусков dpd: {dpd_missing}; в расчёте считаются нулевой просрочкой.",
                            warn_only=True)
             report.add("portfolio_dpd_non_negative", bool((dpd.dropna() >= 0).all()),
                        f"Отрицательных dpd: {int((dpd < 0).sum())}")

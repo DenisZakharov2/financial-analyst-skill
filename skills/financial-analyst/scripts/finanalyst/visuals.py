@@ -165,7 +165,6 @@ def chart_anomalies(anomalies: pd.DataFrame, path: Path, label: str = "") -> Pat
         _empty(path)
         return None
     data = anomalies.sort_values("_z")
-    # Avoid .dt.strftime which triggers segfault in pandas 2.2.3/numpy 2.1.3
     col = data["period_start"]
     if hasattr(col.dtype, 'kind') and col.dtype.kind == 'M':  # datetime64
         labels = [v.strftime("%Y-%m-%d") if hasattr(v, 'strftime') else str(v)[:10] for v in col]
@@ -470,7 +469,6 @@ def build_dashboard(survey: pd.DataFrame, indicator: str, path: Path,
 
     wide = (data.pivot_table(index="period_start", columns="industry", values="value", aggfunc="first")
                 .sort_index())
-    # Avoid strftime on Timestamp (segfault risk in pandas 2.2.3/numpy 2.1.3)
     periods = []
     for p in wide.index:
         if hasattr(p, 'strftime') and hasattr(p, 'year') and hasattr(p, 'month'):

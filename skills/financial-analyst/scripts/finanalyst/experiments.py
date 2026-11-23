@@ -396,7 +396,7 @@ def estimate_did(
     unit_col: str = "region",
     period_col: str = "period",
     outcome_col: str = "value",
-    treated_units: list[str] | set[str] = (),
+    treated_units: list[str] | set[str] = set(),
     intervention_period: str = "",
     alpha: float = 0.05,
 ) -> dict:

@@ -151,7 +151,6 @@ def records(frame: pd.DataFrame | None) -> list[dict]:
         return []
     clean = frame.copy()
     for column in clean.columns:
-        # Avoid .map() which triggers segfault in pandas 2.2.3/numpy 2.1.3
         clean[column] = [
             None if (isinstance(v, float) and np.isnan(v)) else v
             for v in clean[column]
@@ -188,7 +187,6 @@ def json_ready(value):
     if isinstance(value, (np.floating, float)):
         number = float(value)
         return None if np.isnan(number) or np.isinf(number) else number
-    # Handle pandas Timestamp without calling strftime (segfault risk)
     if hasattr(value, 'strftime') and hasattr(value, 'year') and hasattr(value, 'month') and hasattr(value, 'day'):
         try:
             return f"{int(value.year):04d}-{int(value.month):02d}-{int(value.day):02d}"
@@ -609,6 +607,7 @@ def _stage_quality(p: _Pipeline) -> None:
 
 def _init_metrics_payload(p: _Pipeline) -> None:
     """Инициализирует metrics_payload: метаданные, качество и накопители разделов."""
+    assert p.quality is not None
     p.metrics_payload = {
         "meta": {
             "version": __version__,
@@ -1053,7 +1052,7 @@ def _stage_comparison(p: _Pipeline) -> None:
                      comparison["assumption"]))
     bridge = comparison["portfolio_bridge"]
     if bridge.get("available"):
-        def _pct(value: object) -> str:
+        def _pct(value: float | None) -> str:
             return "—" if value is None else f"{float(value):.2f}%"
 
         p.sections.append(("Сравнение: портфельный Bridge", bridge["bridge_table"],
@@ -1167,6 +1166,7 @@ def _stage_metrics(p: _Pipeline) -> None:
 
 def _stage_reports(p: _Pipeline) -> None:
     """Финальные отчёты: DOCX/PDF/XLSX/PPTX/RTF, HTML-версия и итоговый лог."""
+    assert p.quality is not None
     report = ReportData(
         title=p.args.title,
         subtitle=f"Источник: {p.data_dir.name}",
@@ -1211,6 +1211,7 @@ def run(args: argparse.Namespace) -> int:
     _stage_load(p)
     _stage_ab_test(p)
     _stage_quality(p)
+    assert p.quality is not None
     p.warnings = list(p.quality.warnings)
     _init_metrics_payload(p)
     _stage_portfolio(p)

@@ -9,13 +9,16 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from .core import STAGE_ORDER, STAGE_RANK, drop_total_rows, parse_period, period_ym
+from .core import (
+    STAGE_ORDER,
+    STAGE_RANK,
+    drop_total_rows,
+    parse_period,
+    period_step,
+    period_ym,
+)
 
 # Порядок этапов воронки определён в core: контроль качества использует его же.
-
-# Сколько месяцев покрывает один период каждого типа.
-PERIOD_MONTHS = {"M": 1, "D": 1, "Q": 3, "Y": 12}
-
 
 class MetricError(ValueError):
     """Ошибка входных данных, которую нужно показать пользователю."""
@@ -39,7 +42,7 @@ def _months_in_periods(values: pd.Series) -> int:
         if pd.isna(start):
             continue
         year, month = int(start.year), int(start.month)
-        for _ in range(PERIOD_MONTHS.get(kind, 1)):
+        for _ in range(period_step(kind)):
             covered.add(f"{year:04d}-{month:02d}")
             month += 1
             if month == 13:
@@ -98,7 +101,7 @@ def _new_clients(clients: pd.DataFrame | None, finance: pd.DataFrame,
             month = int(start_ts.month)
         except (AttributeError, ValueError):
             return ""
-        months = PERIOD_MONTHS.get(kind, 1)
+        months = period_step(kind)
         month += months
         year += (month - 1) // 12
         month = ((month - 1) % 12) + 1
@@ -157,6 +160,7 @@ def portfolio_summary(
     df["dpd"] = _num(df, "dpd", default=0.0).fillna(0.0)
     # Итоговую строку product_code=ALL не суммируем с детализацией (словарь данных, §3).
     df, excluded = drop_total_rows(df, group=())
+    assert df is not None
 
     if products is not None and "product_code" in df.columns:
         ref = products[["product_code", "product_type"]] if "product_type" in products.columns else None
@@ -232,7 +236,6 @@ def funnel_summary(events: pd.DataFrame, stage_column: str = "stage") -> dict:
         raise MetricError(f"Нет колонки {stage_column!r}: {list(events.columns)}")
 
     df = events.copy()
-    # Avoid .map() which triggers segfault in pandas 2.2.3/numpy 2.1.3
     df["_stage"] = [_normalize_stage(v) for v in df[stage_column]]
     unknown = sorted(set(df["_stage"]) - set(STAGE_ORDER))
     if unknown:
@@ -251,7 +254,6 @@ def funnel_summary(events: pd.DataFrame, stage_column: str = "stage") -> dict:
     else:
         raise MetricError("Нужна колонка application_id или client_id")
 
-    # Avoid .map() which triggers segfault in pandas 2.2.3/numpy 2.1.3
     df["_rank"] = [STAGE_RANK.get(v, 0) for v in df["_stage"]]
     rank = df.groupby(entity_col)["_rank"].max()
 
@@ -303,6 +305,7 @@ def finance_summary(finance: pd.DataFrame, portfolio: pd.DataFrame | None = None
             df[column] = pd.to_numeric(df[column], errors="coerce")
 
     df, excluded = drop_total_rows(df, group=("period",))
+    assert df is not None
     if raw_periods is not None:
         raw_periods = raw_periods.loc[df.index]
 
@@ -342,6 +345,7 @@ def finance_summary(finance: pd.DataFrame, portfolio: pd.DataFrame | None = None
 
     if portfolio is not None and "balance" in portfolio.columns:
         clean_port, _ = drop_total_rows(portfolio, group=())
+        assert clean_port is not None
         if "status" in clean_port.columns:
             clean_port = clean_port[clean_port["status"].astype(str).str.strip().str.lower() != "закрыт"]
         work_port = clean_port
@@ -382,6 +386,7 @@ def unit_economics(
     work_portfolio = portfolio
     if portfolio is not None and "client_id" in portfolio.columns:
         clean_port, _ = drop_total_rows(portfolio, group=())
+        assert clean_port is not None
         if "status" in clean_port.columns:
             clean_port = clean_port[clean_port["status"].astype(str).str.strip().str.lower() != "закрыт"]
         work_portfolio = clean_port
@@ -401,6 +406,7 @@ def unit_economics(
     months = max(_months_in_periods(finance["period"]), 1) if "period" in finance.columns else 1
     if "period" in finance.columns and "product_code" in finance.columns:
         period_rows, _ = drop_total_rows(finance, group=("period",))
+        assert period_rows is not None
         months = max(_months_in_periods(period_rows["period"]), 1)
     arpu = revenue / active_clients / months if active_clients else None
     marketing = fin.get("marketing_cost")
