@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.1.4 — 2026-11-23
+
+По фиксу CI после релиза v2.1.3.
+
+**Исправлено**
+
+- `mypy` под Python 3.10 падал на неявном типе срезов numpy в
+  `drivers.py._granger_f_test` (`ndarray[tuple[int, ...], Any]` vs
+  ожидаемый `ndarray[tuple[int], dtype[float64]]`): списки `r_cols` /
+  `u_cols` явно аннотированы как `list[np.ndarray]`.
+
 ## 2.1.3 — 2026-11-23
 
 По аудиту v2.1.2 (`CODE_REVIEW_REPORT.md`).
