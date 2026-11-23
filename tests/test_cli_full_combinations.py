@@ -103,7 +103,8 @@ def test_full_combo_writes_all_sections(tmp_path):
     assert abs(par["within_risk_effect_pp"] + par["structural_mix_effect_pp"] - par["delta_par_pp"]) < 0.01, par
 
     _assert_metric_rows(payload["metrics"])
-    for top in ("meta", "quality", "assumptions", "warnings", "sections", "metrics", "headline", "notes"):
+    for top in ("meta", "quality", "assumptions", "warnings", "sections", "metrics",
+                "headline", "insights", "notes"):
         assert top in payload, f"корневой ключ {top!r} отсутствует"
 
 

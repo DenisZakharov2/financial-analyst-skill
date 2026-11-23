@@ -798,3 +798,96 @@ def _infer_step_months(periods: pd.Series) -> int:
     """Return step in months (1, 3, 6, 12, or 0 for daily/weekly)."""
     days = _median_step_days(periods) or 30.0
     return _step_months_from_days(days)
+
+
+# Пороги структурных наблюдений. Меняются здесь — сразу отражаются в отчётах;
+# «магические» числа в теле функции не используются.
+PAR30_WARN_PCT = 10.0      # PAR 30 выше этого значения — наблюдение уровня warn
+LTV_CAC_WARN = 3.0         # LTV/CAC ниже — наблюдение уровня warn
+
+INSIGHT_KEYS = {"type", "title", "driver", "contribution_pct", "severity", "value"}
+
+
+def _insight(insight_type: str, title: str, driver: str, severity: str,
+             value, contribution_pct: float | None = None) -> dict:
+    """Одно структурное наблюдение для ``metrics.json → insights``.
+
+    Каждое наблюдение описывает, *что* увидели в уже посчитанных разделах,
+    *откуда* взялось (driver) и как критично (severity). Никаких выводов
+    от лица агента — только факты и дерево принятия решения.
+    """
+    return {
+        "type": insight_type,
+        "title": title,
+        "driver": driver,
+        "contribution_pct": contribution_pct,
+        "severity": severity,
+        "value": value,
+    }
+
+
+def build_insights(sections: dict) -> list[dict]:
+    """Структурные наблюдения из уже посчитанных разделов отчёта.
+
+    Чистая функция: вход — сериализованные ``sections`` из
+    ``metrics.json``, вывод — список наблюдений. Каждое наблюдение:
+    ``type`` (идентификатор), ``title`` (заголовок), ``driver`` (откуда взято),
+    ``contribution_pct`` (вклад в %, если применимо), ``severity`` (info/warn),
+    ``value`` (ключевое число или этап).
+
+    Наблюдения:
+    * ``high_par30`` — PAR 30 портфеля выше порога (warn).
+    * ``low_ltv_cac`` — LTV/CAC ниже 3 (warn).
+    * ``funnel_biggest_loss`` — этап воронки с наибольшими потерями (info).
+    * ``macro_anomalies`` — число макро-аномалий и их доля от точек ряда (info).
+
+    Без данных раздела — наблюдения нет, а не пустое число.
+    """
+    insights: list[dict] = []
+
+    portfolio = sections.get("portfolio", {}) or {}
+    totals = portfolio.get("totals", {}) or {}
+    par30 = totals.get("par30_pct")
+    if par30 is not None and float(par30) > PAR30_WARN_PCT:
+        insights.append(_insight(
+            "high_par30", "Высокий PAR 30", "портфель", "warn",
+            round(float(par30), 2),
+        ))
+
+    unit = sections.get("unit_economics", {}) or {}
+    ltv_cac = unit.get("ltv_cac")
+    if ltv_cac is not None and float(ltv_cac) < LTV_CAC_WARN:
+        insights.append(_insight(
+            "low_ltv_cac", "Низкий LTV/CAC", "юнит-экономика", "warn",
+            round(float(ltv_cac), 2),
+        ))
+
+    funnel = sections.get("funnel", {}) or {}
+    rows = funnel.get("rows") or []
+    best_stage, best_lost = None, None
+    for row in rows:
+        lost = row.get("lost")
+        if lost is None:
+            continue
+        if best_lost is None or float(lost) > best_lost:
+            best_lost = float(lost)
+            best_stage = row.get("stage")
+    if best_stage is not None:
+        insights.append(_insight(
+            "funnel_biggest_loss", "Самая большая потеря воронки", "воронка",
+            "info", str(best_stage),
+        ))
+
+    macro = sections.get("macro", {}) or {}
+    anomalies = macro.get("anomalies") or []
+    points = macro.get("points")
+    if anomalies:
+        contribution = None
+        if points:
+            contribution = round(len(anomalies) / float(points) * 100, 1)
+        insights.append(_insight(
+            "macro_anomalies", "Макро-аномалии", "макро", "info",
+            len(anomalies), contribution_pct=contribution,
+        ))
+
+    return insights

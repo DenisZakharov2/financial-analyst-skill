@@ -162,3 +162,40 @@ def test_report_files_created_with_new_sections(tmp_path):
     assert result.returncode == 0, result.stderr or result.stdout
     assert (out_dir / "financial_analyst_report.docx").exists()
     assert (out_dir / "financial_analyst_report.xlsx").exists()
+
+
+def test_cohort_flag_adds_section(tmp_path):
+    """--cohort: раздел когорт в metrics.json, retention 0..max_age, headline."""
+    data_dir = _sample_copy(tmp_path)
+    payload = _run(data_dir, tmp_path / "out", "--cohort")
+
+    cohorts = payload["sections"].get("cohorts")
+    assert cohorts is not None, "раздел cohorts отсутствует в metrics.json"
+    starts = cohorts["starts"]
+    assert len(starts) == len(pd.read_csv(data_dir / "clients.csv")), starts
+    assert all(len(ym) == 7 and ym[4] == "-" for ym in starts.values())
+
+    retention = cohorts["retention"]
+    assert retention, "retention-кривые пусты"
+    assert {"age_months"} <= set(retention[0])
+    ages = [row["age_months"] for row in retention]
+    assert ages == list(range(ages[0], ages[-1] + 1)), "возраста без дыр"
+    cohort_columns = cohorts["cohorts"]
+    for row in retention:
+        for column in cohort_columns:
+            value = row.get(column)
+            if value is not None:
+                assert 0.0 <= value <= 100.0, (column, value)
+
+    headline = {item["label"]: item for item in payload["headline"]}
+    assert headline["Клиентов в когортах"]["raw"] == 60
+
+
+def test_cohort_without_client_tables_is_skipped(tmp_path):
+    """Без clients/portfolio флаг не падает — раздел пропускается с предупреждением."""
+    data_dir = _sample_copy(tmp_path)
+    (data_dir / "clients.csv").unlink()
+    (data_dir / "portfolio.csv").unlink()
+    payload = _run(data_dir, tmp_path / "out", "--cohort")
+    assert "cohorts" not in payload["sections"]
+    assert any("Когорты пропущены" in warning for warning in payload["warnings"])

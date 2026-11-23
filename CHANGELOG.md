@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.1.5 — 2026-11-23
+
+**Добавлено**
+
+- `metrics.json`: блок `insights` — структурные наблюдения
+  (`{type, driver, contribution_pct, severity, value}`): высокий PAR 30,
+  низкий LTV/CAC, крупнейшая потеря воронки, макро-аномалии.
+- CLI-флаг `--cohort` и раздел `cohorts` в `metrics.json`: старт когорты
+  (первый продукт из портфеля, иначе registration_date) и retention-кривые
+  по возрасту в месяцах по `references/cohorts.md`.
+
 ## 2.1.4 — 2026-11-23
 
 По фиксу CI после релиза v2.1.3.

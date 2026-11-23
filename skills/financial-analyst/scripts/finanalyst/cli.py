@@ -20,6 +20,7 @@ import pandas as pd
 
 from . import __version__
 from .adapters import cbr_survey, client_csv
+from .cohorts import cohort_starts, retention_curves
 from .comparison import compare_snapshots
 from .core import (
     KNOWN_TABLES,
@@ -38,6 +39,7 @@ from .experiments import run_ab_test
 from .forecast import forecast_advanced
 from .metrics import (
     MetricError,
+    build_insights,
     finance_summary,
     forecast_trend,
     funnel_summary,
@@ -106,6 +108,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Сегментация клиентов: матрица RFM + Risk и кластеризация")
     parser.add_argument("--no-cluster", action="store_true",
                         help="Без кластеризации в сегментации (только RFM + Risk)")
+    parser.add_argument("--cohort", action="store_true",
+                        help="Когортный анализ: старт когорты и retention-кривые "
+                             "по возрасту в месяцах (соглашения — references/cohorts.md)")
     parser.add_argument("--drivers", action="store_true",
                         help="Факторный разбор: PVM и разложение сдвига PAR между срезами, "
                              "лаговые связи макропоказателей")
@@ -789,6 +794,48 @@ def _stage_segmentation(p: _Pipeline) -> None:
         p.warnings.append(f"Сегментация не рассчитана: {segmentation_result.get('assumption', '')}")
 
 
+def _stage_cohort(p: _Pipeline) -> None:
+    """Когорты (--cohort): старт когорты и retention-кривые по возрасту в месяцах.
+
+    Соглашения — references/cohorts.md: старт когорты — месяц первого продукта
+    из portfolio.open_date, иначе registration_date из clients. Клиент активен
+    в месяце, если у него есть счёт с ненулевым остатком, не закрытый к концу
+    месяца. Результат — доля активных когорты по возрасту (возраст 0 = месяц
+    старта).
+    """
+    if not getattr(p.args, "cohort", False):
+        return
+    starts = cohort_starts(p.tables.get("clients"), p.tables.get("portfolio"))
+    if starts.empty:
+        p.warnings.append(
+            "Когорты пропущены: нет разбираемых дат старта "
+            "(portfolio.open_date или clients.registration_date)."
+        )
+        return
+    curves = retention_curves(starts, p.tables.get("portfolio"))
+    if curves.empty:
+        p.warnings.append(
+            "Когорты пропущены: портфель не даёт активных месяцев клиентов."
+        )
+        return
+    frame = curves.reset_index()
+    p.sections.append((
+        "Когорты: удержание по возрасту (мес.)",
+        frame,
+        "Возраст 0 — месяц старта когорты. Клиент активен в месяце, если у "
+        "него есть счёт с ненулевым остатком, не закрытый к концу месяца.",
+    ))
+    p.metrics_payload["sections"]["cohorts"] = {
+        "starts": {str(client): ym for client, ym in starts.items()},
+        "retention": records(frame),
+        "cohorts": list(curves.columns),
+    }
+    p.headline.append(headline_row(
+        "Клиентов в когортах", int(starts.size), "чел.", "clients, portfolio",
+        digits=0,
+    ))
+
+
 def _stage_finance(p: _Pipeline) -> None:
     """Раздел «Финансы»: показатели, юнит-экономика, сезонность и прогноз выручки."""
     finance = p.tables.get("finance")
@@ -1157,6 +1204,7 @@ def _stage_metrics(p: _Pipeline) -> None:
     p.metrics_payload["metrics"] = metric_rows
     p.metrics_payload["headline"] = p.headline
     p.metrics_payload["notes"] = p.notes
+    p.metrics_payload["insights"] = build_insights(p.metrics_payload["sections"])
     (p.out_dir / "metrics.json").write_text(
         json.dumps(json_ready(p.metrics_payload), ensure_ascii=False, indent=2, allow_nan=False),
         encoding="utf-8")
@@ -1218,6 +1266,7 @@ def run(args: argparse.Namespace) -> int:
     _stage_funnel(p)
     _stage_ab_report(p)
     _stage_segmentation(p)
+    _stage_cohort(p)
     _stage_finance(p)
     _stage_macro(p)
     _stage_macro_tables(p)
