@@ -1,7 +1,6 @@
 import sys
 from pathlib import Path
 
-import pandas as pd
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -57,6 +56,8 @@ def date_strings_daily(start: str, periods: int) -> list[str]:
     дней, из-за чего между «соседними» датами получалось 4 суток, а тесты TAT
     и дневных рядов считали неверные интервалы.
     """
+    import pandas as pd
+
     year, month, day = map(int, start.split("-"))
     anchor = pd.Timestamp(year=year, month=month, day=day)
     return [
@@ -65,21 +66,21 @@ def date_strings_daily(start: str, periods: int) -> list[str]:
     ]
 
 
-@ pytest.fixture(scope="session")
+@pytest.fixture(scope="session")
 def date_strings_fixture():
     return date_strings
 
 
-@ pytest.fixture(scope="session")
+@pytest.fixture(scope="session")
 def date_strings_daily_fixture():
     return date_strings_daily
 
 
-@ pytest.fixture(scope="session")
+@pytest.fixture(scope="session")
 def skill_dir() -> Path:
     return SKILL
 
 
-@ pytest.fixture(scope="session")
+@pytest.fixture(scope="session")
 def sample_dir(skill_dir: Path) -> Path:
     return skill_dir / "assets" / "sample"
