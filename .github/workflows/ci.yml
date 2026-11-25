@@ -90,43 +90,70 @@ jobs:
         run: |
           PGPASSWORD=testpass psql -h localhost -U testuser -d testdb -c "
             CREATE TABLE portfolio (
-              client_id TEXT,
               account_id TEXT,
+              client_id TEXT,
               product_code TEXT,
+              open_date DATE,
+              close_date DATE,
+              limit_amount NUMERIC,
               balance NUMERIC,
+              currency TEXT,
+              status TEXT,
               dpd INTEGER,
               par_bucket TEXT,
               period_start DATE
             );
             CREATE TABLE clients (
               client_id TEXT PRIMARY KEY,
-              region TEXT,
               segment TEXT,
-              registration_date DATE
+              region TEXT,
+              acquisition_channel TEXT,
+              registration_date DATE,
+              age INTEGER,
+              gender TEXT
             );
             CREATE TABLE products (
               product_code TEXT PRIMARY KEY,
+              product_type TEXT,
               product_name TEXT,
-              product_type TEXT
+              interest_rate NUMERIC,
+              tariff NUMERIC,
+              cost_of_funds NUMERIC,
+              reserve_rate NUMERIC
             );
             CREATE TABLE finance (
               period TEXT,
               product_code TEXT,
-              revenue NUMERIC,
-              cost NUMERIC
+              interest_income NUMERIC,
+              fee_income NUMERIC,
+              funding_cost NUMERIC,
+              opex NUMERIC,
+              reserve_expense NUMERIC,
+              tax NUMERIC,
+              marketing_cost NUMERIC
             );
             CREATE TABLE funnel_events (
+              event_id TEXT,
               application_id TEXT,
               client_id TEXT,
+              product_code TEXT,
+              channel TEXT,
               stage TEXT,
-              timestamp TIMESTAMP
+              event_date DATE,
+              campaign_id TEXT
             );
             CREATE TABLE sales (
+              application_id TEXT,
               client_id TEXT,
               product_code TEXT,
+              channel TEXT,
+              manager_id TEXT,
+              application_date DATE,
+              funnel_stage TEXT,
+              stage_date DATE,
+              result TEXT,
               amount NUMERIC,
-              deals INTEGER,
-              period TEXT
+              premium NUMERIC
             );
           "
 
