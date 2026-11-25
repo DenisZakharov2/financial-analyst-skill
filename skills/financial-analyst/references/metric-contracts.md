@@ -51,16 +51,27 @@
 | `did_att_effect` | панель (регион × период) | коэффициент при `Treat × Post` (OLS с HC1 SE) | — | нет вариации до/после → `null` | панель |
 | `rfm_segment` | клиент (`client_id`) | правило по квантилям $R, F, M$ и `max_dpd` | — | `max_dpd > 0` → всегда `Просроченные (DPD > 0)` | clients, portfolio, sales |
 | `bridge_balance_delta` | корзина клиентов | $\sum (B_{i,1} - B_{i,0})$ внутри корзины (`New`, `Churned`, `Expansion`, `Contraction`, `Flat`) | — | сумма пяти корзин равна $\Delta \text{Total}$; у `Flat` дельта 0 | portfolio (2 среза) |
-| `net_dollar_retention_pct` | портфель (2 среза) | баланс удержанных клиентов (`both`) в целевом срезе | общий баланс базового среза | $B_0 = 0$ → `null`, не 0 | portfolio (2 среза) |
+|| `net_dollar_retention_pct` | портфель (2 среза) | баланс удержанных клиентов (`both`) в целевом срезе | общий баланс базового среза | $B_0 = 0$ → `null`, не 0 | portfolio (2 среза) ||
+|| `migration_matrix_pct` | клиент × бакет | доля клиентов (баланса) в целевом бакете | клиенты (баланс) в базовом бакете | базовый бакет пуст → `null` | portfolio (2 среза) ||
+|| `vintage_balance` | винтаж (YYYY-MM) | сумма балансов счетов винтажа | — | нет счетов винтажа → `null` | portfolio ||
+|| `vintage_par30_pct` | винтаж | баланс с `dpd ≥ 30` | баланс винтажа | баланс = 0 → `null` | portfolio.dpd, balance ||
+|| `vintage_par60_pct` | винтаж | баланс с `dpd ≥ 60` | баланс винтажа | баланс = 0 → `null` | portfolio.dpd, balance ||
+|| `vintage_par90_pct` | винтаж | баланс с `dpd ≥ 90` | баланс винтажа | баланс = 0 → `null` | portfolio.dpd, balance ||
+|| `vintage_active_rate_pct` | винтаж | активные счета (balance > 0, не закрыты) | все счета винтажа | счетов нет → `null` | portfolio ||
 
 `nim_pct` — годовая ставка: поток за месяцы выгрузки приводится к месяцу и
 умножается на 12, иначе выручка за 6 месяцев делится на остаток одного дня.
 
-> Строки `pvm_*`, `within_risk_effect_pp`, `structural_mix_effect_pp`, `granger_p_fdr`,
-> `ab_srm_p_value`, `ab_absolute_effect`, `did_att_effect`, `rfm_segment`, `smape_pct`,
-> `mase` реализованы в версии 2.1.0 модулями `drivers`, `experiments`, `segmentation`
-> и `forecast`; вызываются флагами `--drivers`, `--ab-test`, `--segment` и
-> `--forecast-model`.
+> Строки `pvm_*`, `within_risk_effect_pp`, `structural_mix_effect_pp`, `granger_p_fdr`,\
+> `ab_srm_p_value`, `ab_absolute_effect`, `did_att_effect`, `rfm_segment`, `smape_pct`,\
+> `mase` реализованы в версии 2.1.0 модулями `drivers`, `experiments`, `segmentation`\
+> и `forecast`; вызываются флагами `--drivers`, `--ab-test`, `--segment` и\
+> `--forecast-model`.\
+> \
+> Строки `migration_matrix_pct`, `vintage_balance`, `vintage_par30_pct`,\
+> `vintage_par60_pct`, `vintage_par90_pct`, `vintage_active_rate_pct`\
+> реализованы в версии 2.1.6 модулем `migration`; вызываются флагами `--migration`\
+> и `--vintage`.
 
 ## Правила
 

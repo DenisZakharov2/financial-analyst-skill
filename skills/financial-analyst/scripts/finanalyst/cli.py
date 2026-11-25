@@ -19,9 +19,10 @@ import numpy as np
 import pandas as pd
 
 from . import __version__
-from .adapters import cbr_survey, client_csv
+from .adapters import cbr_survey, client_csv, postgres
 from .cohorts import cohort_starts, retention_curves
 from .comparison import compare_snapshots
+from .config import PipelineConfig, merge_configs
 from .core import (
     KNOWN_TABLES,
     WORKBOOK_SUFFIXES,
@@ -29,6 +30,7 @@ from .core import (
     QualityReport,
     assert_no_blocking_failures,
     load_tables,
+    load_tables_streaming,
     normalize_periods,
     period_labels,
     period_ym,
@@ -50,6 +52,7 @@ from .metrics import (
     portfolio_summary,
     unit_economics,
 )
+from .migration import migration_matrix, vintage_analysis
 from .pii import sanitize_tables
 from .reporting import ReportData, column_title, fmt_num, quality_frame, write_html, write_reports
 from .seasonality_tat import funnel_tat, seasonality_summary
@@ -73,7 +76,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Финансовый анализ портфеля, воронки и макро-данных с генерацией отчётов.",
     )
-    parser.add_argument("--data-dir", type=Path, required=True, help="Каталог с CSV/Excel")
+    parser.add_argument("--config", type=Path, default=None,
+                        help="Путь к YAML-конфигу (перезаписывается CLI-флагами)")
+    parser.add_argument("--source", choices=["files", "postgres"], default="files",
+                        help="Источник данных: files (CSV/Excel) или postgres (БД)")
+    parser.add_argument("--data-dir", type=Path, default=None, help="Каталог с CSV/Excel (для source=files)")
     parser.add_argument("--out", type=Path, default=Path("./reports"), help="Каталог результатов")
     parser.add_argument("--format", default="docx,pdf,xlsx,pptx,rtf,html",
                         help="Форматы через запятую: docx,pdf,xlsx,pptx,rtf,html")
@@ -111,6 +118,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cohort", action="store_true",
                         help="Когортный анализ: старт когорты и retention-кривые "
                              "по возрасту в месяцах (соглашения — references/cohorts.md)")
+    parser.add_argument("--migration", action="store_true",
+                        help="Матрица переходов PAR-бакетов между двумя срезами портфеля "
+                             "(требуется --compare-dirs)")
+    parser.add_argument("--migration-mode", choices=["clients", "balance"], default="clients",
+                        help="Режим матрицы: доля клиентов или доля баланса (по умолчанию clients)")
+    parser.add_argument("--vintage", action="store_true",
+                        help="Винтажный анализ: баланс и просрочка по месяцам открытия счёта "
+                             "(соглашения — references/migration.md)")
     parser.add_argument("--drivers", action="store_true",
                         help="Факторный разбор: PVM и разложение сдвига PAR между срезами, "
                              "лаговые связи макропоказателей")
@@ -120,12 +135,26 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Завершиться с кодом 2 при провале контроля качества")
     parser.add_argument("--pii-mode", choices=["strict", "redact", "off"], default="strict",
                         help="Режим обработки ПДн: strict=остановить при обнаружении, redact=удалить ПДн и псевдонимизировать ключи, off=отключить проверку")
+    parser.add_argument("--chunksize", type=int, default=None, metavar="N",
+                        help="Размер чанка для стримингового чтения CSV (None = полная загрузка). Включает streaming-режим для больших выгрузок.")
     parser.add_argument("--compare-dirs", nargs=2, metavar=("BASE_DIR", "TARGET_DIR"),
                         help="Сравнить две выгрузки: базовая и целевая директории")
     parser.add_argument("--labels", nargs=2, metavar=("BASE_LABEL", "TARGET_LABEL"), default=["base", "target"],
                         help="Подписи для сравниваемых срезов (по умолчанию base target)")
     parser.add_argument("--title", default="Финансовый аналитический отчёт")
     parser.add_argument("--quiet", action="store_true")
+
+    # PostgreSQL параметры
+    pg_group = parser.add_argument_group("PostgreSQL connection")
+    pg_group.add_argument("--pg-host", default=None, help="Хост PostgreSQL")
+    pg_group.add_argument("--pg-port", type=int, default=None, help="Порт PostgreSQL")
+    pg_group.add_argument("--pg-database", default=None, help="База данных PostgreSQL")
+    pg_group.add_argument("--pg-user", default=None, help="Пользователь PostgreSQL")
+    pg_group.add_argument("--pg-password", default=None, help="Пароль PostgreSQL")
+    pg_group.add_argument("--pg-schema", default=None, help="Схема PostgreSQL (по умолчанию public)")
+    pg_group.add_argument("--pg-chunksize", type=int, default=None, metavar="N",
+                          help="Размер чанка для чтения из PostgreSQL")
+
     return parser
 
 
@@ -415,8 +444,10 @@ class _Pipeline:
     out_dir: Path
     charts_dir: Path
     formats: list[str]
+    config: PipelineConfig
     tables: dict[str, pd.DataFrame] = field(default_factory=dict)
     pii_mode: str = "strict"
+    chunksize: int | None = None
     notes: list[str] = field(default_factory=list)
     sections: list[tuple[str, pd.DataFrame, str]] = field(default_factory=list)
     assumptions: list[str] = field(default_factory=list)
@@ -448,9 +479,35 @@ def _safe_chart(p: _Pipeline, key: str, warning: str, build) -> None:
         p.warnings.append(f"{warning}: {e}")
 
 
-def _prepare_dirs(args: argparse.Namespace) -> tuple[Path, Path, Path, list[str]]:
-    """Готовит каталоги вывода: создаёт out и charts, удаляет устаревшие файлы."""
-    data_dir: Path = args.data_dir
+def _prepare_dirs(args: argparse.Namespace) -> tuple[Path, Path, Path, list[str], int | None, PipelineConfig]:
+    """Готовит каталоги вывода: создаёт out и charts, удаляет устаревшие файлы.
+
+    Возвращает: data_dir, out_dir, charts_dir, formats, chunksize, merged_config
+    """
+    # Загружаем YAML-конфиг если указан
+    yaml_config = None
+    if args.config:
+        yaml_config = PipelineConfig.from_file(args.config)
+
+    # Подготавливаем словарь CLI-аргументов для мерджа
+    cli_dict = vars(args).copy()
+    # Path объекты приводим к строкам для сериализации
+    for key, value in cli_dict.items():
+        if isinstance(value, Path):
+            cli_dict[key] = str(value)
+
+    # Мерджим конфиги
+    config = merge_configs(yaml_config, cli_dict)
+
+    # Определяем data_dir
+    if config.source == "files":
+        if not config.data_dir:
+            raise ValueError("--data-dir обязателен для source=files")
+        data_dir = Path(config.data_dir)
+    else:
+        # Для postgres data_dir не нужен, но может использоваться для macro_survey из файлов
+        data_dir = Path(config.data_dir) if config.data_dir else Path(".")
+
     out_dir: Path = args.out
     formats = [item.strip().lower() for item in args.format.split(",") if item.strip()]
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -461,21 +518,202 @@ def _prepare_dirs(args: argparse.Namespace) -> tuple[Path, Path, Path, list[str]
     for stale in ("dashboard.html", "financial_analyst_report.html", "report.html"):
         (out_dir / stale).unlink(missing_ok=True)
     setup_matplotlib()
-    return data_dir, out_dir, charts_dir, formats
+
+    # chunksize: приоритет CLI > config > None
+    chunksize = args.chunksize if args.chunksize is not None else config.chunksize
+
+    return data_dir, out_dir, charts_dir, formats, chunksize, config
 
 
 def _stage_load(p: _Pipeline) -> None:
-    """Загрузка таблиц: адаптеры, нормализация, защита ПДн, отбрасывание лишнего."""
+    """Загрузка таблиц: адаптеры, нормализация, защита ПДн, отбрасывание лишнего.
+
+    Поддерживает источники:
+    - files: CSV/Excel из каталога (обычный или streaming)
+    - postgres: таблицы из PostgreSQL (обычный или streaming)
+    """
+    config = p.config
+
+    # Streaming-режим: если задан chunksize, используем итеративную загрузку
+    if p.chunksize is not None:
+        if config.source == "postgres":
+            _stage_load_postgres_streaming(p)
+        else:
+            _stage_load_streaming(p)
+        return
+
+    # Обычный режим (полная загрузка)
+    if config.source == "postgres":
+        _stage_load_postgres(p)
+    else:
+        _stage_load_files(p)
+
+
+def _stage_load_streaming(p: _Pipeline) -> None:
+    """Загрузка таблиц в streaming-режиме: CSV читаются чанками, агрегация на лету.
+
+    В этом режиме таблицы не загружаются полностью в память. Вместо этого
+    мы собираем агрегаты, нужные для расчёта метрик, итеративно.
+    """
     args = p.args
-    # В режиме auto/cbr книги stat_*.xlsx читает cbr_survey.parse_workbook (все листы),
-    # поэтому пропускаем их в load_tables, чтобы не читать первый лист дважды.
+    p.notes.append(f"Streaming-режим: chunksize={p.chunksize}")
+
+    # В streaming-режиме Excel файлы (stat_*.xlsx) читаются целиком,
+    # так как они обычно небольшие. CSV читаются чанками.
+    skip_patterns = ("stat_",) if args.adapter in {"auto", "cbr"} else ()
+
+    # Сначала читаем Excel файлы (macro_survey из stat_*.xlsx)
+    workbook_paths = sorted(path for path in p.data_dir.iterdir()
+                            if path.suffix.lower() in WORKBOOK_SUFFIXES)
+    survey_paths = ([path for path in workbook_paths if path.name.lower().startswith("stat_")]
+                    if args.adapter == "auto" else workbook_paths)
+    excel_tables: dict[str, pd.DataFrame] = {}
+    if args.adapter in {"auto", "cbr"}:
+        for path in survey_paths:
+            survey = cbr_survey.parse_workbook(path)
+            if survey.empty:
+                continue
+            survey = normalize_periods(survey)
+            excel_tables["macro_survey"] = survey
+            count = f"{len(survey):,}".replace(",", " ")
+            p.notes.append(f"Выгрузка {path.name}: {count} строк, "
+                         f"{survey['industry'].nunique()} отраслей, "
+                         f"{survey['indicator'].nunique()} показателей.")
+            break
+        else:
+            if args.adapter == "auto" and survey_paths:
+                p.notes.append("Книга stat_*.xlsx найдена, но выгрузка опросов не распознана: "
+                             "проверьте строку заголовков и листы.")
+            elif args.adapter == "auto" and any(wb.name.lower().startswith("stat_") for wb in workbook_paths):
+                p.notes.append("Книга с опросами не найдена: адаптер ищет файл stat_*.xlsx. "
+                             "Для файла с другим именем запустите с --adapter cbr.")
+    if args.adapter == "client":
+        excel_tables.pop("macro_survey", None)
+
+    # Теперь итеративно читаем CSV чанками и агрегируем
+    # normalize_periods уже импортирован на уровне модуля
+
+    # Агрегаторы: собираем данные для финального расчёта
+    agg_portfolio: list[pd.DataFrame] = []
+    agg_funnel: list[pd.DataFrame] = []
+    agg_finance: list[pd.DataFrame] = []
+    agg_clients: list[pd.DataFrame] = []
+    agg_products: list[pd.DataFrame] = []
+    agg_sales: list[pd.DataFrame] = []
+
+    total_chunks = 0
+    # p.chunksize гарантированно не None здесь (проверка в _stage_load)
+    chunksize = p.chunksize
+    assert chunksize is not None
+    for chunk_tables in load_tables_streaming(p.data_dir, chunksize, skip_patterns=skip_patterns):
+        # Добавляем Excel таблицы к каждому чанку
+        for name, df in excel_tables.items():
+            chunk_tables[name] = df
+
+        # Нормализация и клиентский адаптер
+        chunk_tables, alias_notes = client_csv.normalize(chunk_tables)
+        if total_chunks == 0:
+            p.notes.extend(alias_notes)
+
+        # PII sanitization на первом чанке (проверяем только структуру)
+        if total_chunks == 0:
+            pii_mode = getattr(args, "pii_mode", "strict")
+            p.pii_mode = pii_mode
+            if pii_mode != "off":
+                chunk_tables, pii_report = sanitize_tables(chunk_tables, mode=pii_mode)
+                if pii_report.get("pii_found"):
+                    if pii_mode == "strict":
+                        pass
+                    p.notes.append(
+                        f"PII: режим={pii_mode}, удалены колонки={pii_report['findings']}, "
+                        f"псевдонимизированы ключи={pii_report['pseudonymized_columns']}"
+                    )
+                    if pii_report.get("key_ephemeral"):
+                        p.notes.append(
+                            "PII: ключ HMAC сгенерирован на один запуск. Задайте FINANALYST_PII_KEY, "
+                            "чтобы псевдонимы совпадали между запусками."
+                        )
+                else:
+                    p.notes.append("PII: прямых ПДн не обнаружено")
+
+        # Накапливаем таблицы для агрегации
+        for key, df in chunk_tables.items():
+            if key == "portfolio" or key == "accounts":
+                if "balance" in df.columns:
+                    agg_portfolio.append(df)
+            elif key == "funnel_events" or key == "funnel":
+                if "stage" in df.columns or "funnel_stage" in df.columns:
+                    agg_funnel.append(df)
+            elif key == "finance":
+                if "period" in df.columns:
+                    agg_finance.append(df)
+            elif key == "clients":
+                agg_clients.append(df)
+            elif key == "products":
+                agg_products.append(df)
+            elif key == "sales" or key == "applications":
+                agg_sales.append(df)
+            elif key == "macro_survey":
+                # macro_survey из Excel уже в excel_tables, но может быть и в CSV
+                pass
+
+        total_chunks += 1
+
+    p.notes.append(f"Обработано чанков: {total_chunks}")
+
+    # Теперь объединяем накопленные таблицы и считаем метрики
+    # Для streaming-режима собираем полные таблицы (они уже в памяти после конкатенации)
+    # но только те, что нужны для метрик
+    tables: dict[str, pd.DataFrame] = {}
+
+    if agg_portfolio:
+        tables["portfolio"] = pd.concat(agg_portfolio, ignore_index=True)
+    if agg_funnel:
+        tables["funnel_events"] = pd.concat(agg_funnel, ignore_index=True)
+    if agg_finance:
+        tables["finance"] = pd.concat(agg_finance, ignore_index=True)
+    if agg_clients:
+        tables["clients"] = pd.concat(agg_clients, ignore_index=True)
+    if agg_products:
+        tables["products"] = pd.concat(agg_products, ignore_index=True)
+    if agg_sales:
+        tables["sales"] = pd.concat(agg_sales, ignore_index=True)
+
+    # Добавляем Excel таблицы
+    tables.update(excel_tables)
+
+    # Нормализация периодов для finance
+    if "finance" in tables and "period" in tables["finance"].columns:
+        tables["finance"] = normalize_periods(tables["finance"])
+
+    survey_table = tables.get("macro_survey")
+    if survey_table is not None and "period_start" not in survey_table.columns:
+        if "period" in survey_table.columns:
+            tables["macro_survey"] = normalize_periods(survey_table)
+        else:
+            p.notes.append("macro_survey: нет колонки period — раздел пропущен.")
+            tables.pop("macro_survey")
+
+    # Удаляем служебные таблицы
+    for key in list(tables):
+        if key.lower().startswith("отчет"):
+            tables.pop(key)
+            continue
+        if key not in KNOWN_TABLES:
+            p.notes.append(f"Пропущена таблица {key!r}: её нет в словаре данных.")
+            tables.pop(key)
+
+    p.tables = tables
+
+
+def _stage_load_files(p: _Pipeline) -> None:
+    """Загрузка таблиц из файлов (CSV/Excel) — обычный режим (полная загрузка)."""
+    args = p.args
     skip_patterns = ("stat_",) if args.adapter in {"auto", "cbr"} else ()
     tables = load_tables(p.data_dir, skip_patterns=skip_patterns)
 
     workbook_paths = sorted(path for path in p.data_dir.iterdir()
                             if path.suffix.lower() in WORKBOOK_SUFFIXES)
-    # В auto берём только выгрузки с префиксом stat_: в одном каталоге могут лежать
-    # и клиентские книги. С --adapter cbr разбираем любую книгу, которая читается.
     survey_paths = ([path for path in workbook_paths if path.name.lower().startswith("stat_")]
                     if args.adapter == "auto" else workbook_paths)
     if args.adapter in {"auto", "cbr"}:
@@ -495,7 +733,6 @@ def _stage_load(p: _Pipeline) -> None:
                 p.notes.append("Книга stat_*.xlsx найдена, но выгрузка опросов не распознана: "
                              "проверьте строку заголовков и листы.")
             elif args.adapter == "auto" and any(wb.name.lower().startswith("stat_") for wb in workbook_paths):
-                # Предупреждаем только если есть файлы stat_*, но они не распознались
                 p.notes.append("Книга с опросами не найдена: адаптер ищет файл stat_*.xlsx. "
                              "Для файла с другим именем запустите с --adapter cbr.")
     if args.adapter == "client":
@@ -535,6 +772,200 @@ def _stage_load(p: _Pipeline) -> None:
             tables.pop("macro_survey")
 
     # Удаляем служебные таблицы (отчёты, загруженные по ошибке)
+    for key in list(tables):
+        if key.lower().startswith("отчет"):
+            tables.pop(key)
+            continue
+        if key not in KNOWN_TABLES:
+            p.notes.append(f"Пропущена таблица {key!r}: её нет в словаре данных.")
+            tables.pop(key)
+
+    p.tables = tables
+
+
+def _stage_load_postgres(p: _Pipeline) -> None:
+    """Загрузка таблиц из PostgreSQL — обычный режим (полная загрузка)."""
+    args = p.args
+    config = p.config
+
+    # Собираем конфиг PostgreSQL
+    pg_config = postgres.get_postgres_config(
+        cli_args={
+            "pg_host": args.pg_host,
+            "pg_port": args.pg_port,
+            "pg_database": args.pg_database,
+            "pg_user": args.pg_user,
+            "pg_password": args.pg_password,
+            "pg_schema": args.pg_schema,
+            "pg_chunksize": args.pg_chunksize,
+        },
+        yaml_config=config.postgres,
+    )
+
+    # Валидация обязательных параметров
+    if not pg_config.database:
+        raise ValueError("PostgreSQL: не указана база данных (--pg-database или PGDATABASE)")
+    if not pg_config.user:
+        raise ValueError("PostgreSQL: не указан пользователь (--pg-user или PGUSER)")
+    if not pg_config.password:
+        raise ValueError("PostgreSQL: не указан пароль (--pg-password или PGPASSWORD)")
+
+    skip_patterns = ("stat_",) if args.adapter in {"auto", "cbr"} else ()
+    tables = postgres.load_tables_postgres(pg_config, skip_patterns=skip_patterns)
+
+    # Для PostgreSQL macro_survey не загружается (нет Excel) —
+    # если нужен макро-раздел, подавайте macro_survey.csv отдельно
+    if args.adapter in {"auto", "cbr"}:
+        p.notes.append("Источник PostgreSQL: macro_survey не загружается из БД. "
+                       "Для макро-раздела положите macro_survey.csv в data-dir или используйте --adapter client.")
+
+    tables, alias_notes = client_csv.normalize(tables)
+    p.notes.extend(alias_notes)
+
+    # --- PII sanitization ---
+    pii_mode = getattr(args, "pii_mode", "strict")
+    p.pii_mode = pii_mode
+    if pii_mode != "off":
+        tables, pii_report = sanitize_tables(tables, mode=pii_mode)
+        if pii_report.get("pii_found"):
+            if pii_mode == "strict":
+                pass
+            p.notes.append(
+                f"PII: режим={pii_mode}, удалены колонки={pii_report['findings']}, "
+                f"псевдонимизированы ключи={pii_report['pseudonymized_columns']}"
+            )
+            if pii_report.get("key_ephemeral"):
+                p.notes.append(
+                    "PII: ключ HMAC сгенерирован на один запуск. Задайте FINANALYST_PII_KEY, "
+                    "чтобы псевдонимы совпадали между запусками."
+                )
+        else:
+            p.notes.append("PII: прямых ПДн не обнаружено")
+
+    # Удаляем служебные таблицы
+    for key in list(tables):
+        if key.lower().startswith("отчет"):
+            tables.pop(key)
+            continue
+        if key not in KNOWN_TABLES:
+            p.notes.append(f"Пропущена таблица {key!r}: её нет в словаре данных.")
+            tables.pop(key)
+
+    p.tables = tables
+
+
+def _stage_load_postgres_streaming(p: _Pipeline) -> None:
+    """Загрузка таблиц из PostgreSQL — streaming-режим (чанки)."""
+    args = p.args
+    config = p.config
+
+    pg_config = postgres.get_postgres_config(
+        cli_args={
+            "pg_host": args.pg_host,
+            "pg_port": args.pg_port,
+            "pg_database": args.pg_database,
+            "pg_user": args.pg_user,
+            "pg_password": args.pg_password,
+            "pg_schema": args.pg_schema,
+            "pg_chunksize": args.pg_chunksize,
+        },
+        yaml_config=config.postgres,
+    )
+
+    # Для streaming chunksize обязателен
+    if not pg_config.chunksize:
+        pg_config.chunksize = p.chunksize
+
+    if not pg_config.database:
+        raise ValueError("PostgreSQL: не указана база данных (--pg-database или PGDATABASE)")
+    if not pg_config.user:
+        raise ValueError("PostgreSQL: не указан пользователь (--pg-user или PGUSER)")
+    if not pg_config.password:
+        raise ValueError("PostgreSQL: не указан пароль (--pg-password или PGPASSWORD)")
+
+    p.notes.append(f"PostgreSQL streaming: chunksize={pg_config.chunksize}")
+
+    skip_patterns = ("stat_",) if args.adapter in {"auto", "cbr"} else ()
+
+    # Агрегаторы
+    agg_portfolio: list[pd.DataFrame] = []
+    agg_funnel: list[pd.DataFrame] = []
+    agg_finance: list[pd.DataFrame] = []
+    agg_clients: list[pd.DataFrame] = []
+    agg_products: list[pd.DataFrame] = []
+    agg_sales: list[pd.DataFrame] = []
+
+    total_chunks = 0
+    for chunk_tables in postgres.load_tables_postgres_streaming(pg_config, skip_patterns=skip_patterns):
+        # Нормализация и клиентский адаптер
+        chunk_tables, alias_notes = client_csv.normalize(chunk_tables)
+        if total_chunks == 0:
+            p.notes.extend(alias_notes)
+
+        # PII sanitization на первом чанке
+        if total_chunks == 0:
+            pii_mode = getattr(args, "pii_mode", "strict")
+            p.pii_mode = pii_mode
+            if pii_mode != "off":
+                chunk_tables, pii_report = sanitize_tables(chunk_tables, mode=pii_mode)
+                if pii_report.get("pii_found"):
+                    if pii_mode == "strict":
+                        pass
+                    p.notes.append(
+                        f"PII: режим={pii_mode}, удалены колонки={pii_report['findings']}, "
+                        f"псевдонимизированы ключи={pii_report['pseudonymized_columns']}"
+                    )
+                    if pii_report.get("key_ephemeral"):
+                        p.notes.append(
+                            "PII: ключ HMAC сгенерирован на один запуск. Задайте FINANALYST_PII_KEY, "
+                            "чтобы псевдонимы совпадали между запусками."
+                        )
+                else:
+                    p.notes.append("PII: прямых ПДн не обнаружено")
+
+        # Накапливаем таблицы для агрегации
+        for key, df in chunk_tables.items():
+            if key == "portfolio" or key == "accounts":
+                if "balance" in df.columns:
+                    agg_portfolio.append(df)
+            elif key == "funnel_events" or key == "funnel":
+                if "stage" in df.columns or "funnel_stage" in df.columns:
+                    agg_funnel.append(df)
+            elif key == "finance":
+                if "period" in df.columns:
+                    agg_finance.append(df)
+            elif key == "clients":
+                agg_clients.append(df)
+            elif key == "products":
+                agg_products.append(df)
+            elif key == "sales" or key == "applications":
+                agg_sales.append(df)
+
+        total_chunks += 1
+
+    p.notes.append(f"PostgreSQL streaming: обработано чанков: {total_chunks}")
+
+    # Объединяем накопленные таблицы
+    tables: dict[str, pd.DataFrame] = {}
+
+    if agg_portfolio:
+        tables["portfolio"] = pd.concat(agg_portfolio, ignore_index=True)
+    if agg_funnel:
+        tables["funnel_events"] = pd.concat(agg_funnel, ignore_index=True)
+    if agg_finance:
+        tables["finance"] = pd.concat(agg_finance, ignore_index=True)
+    if agg_clients:
+        tables["clients"] = pd.concat(agg_clients, ignore_index=True)
+    if agg_products:
+        tables["products"] = pd.concat(agg_products, ignore_index=True)
+    if agg_sales:
+        tables["sales"] = pd.concat(agg_sales, ignore_index=True)
+
+    # Нормализация периодов для finance
+    if "finance" in tables and "period" in tables["finance"].columns:
+        tables["finance"] = normalize_periods(tables["finance"])
+
+    # Удаляем служебные таблицы
     for key in list(tables):
         if key.lower().startswith("отчет"):
             tables.pop(key)
@@ -1194,6 +1625,85 @@ def _stage_comparison(p: _Pipeline) -> None:
     }
 
 
+def _stage_migration(p: _Pipeline) -> None:
+    """Раздел «Матрица миграции PAR-бакетов» (--migration + --compare-dirs)."""
+    if not getattr(p.args, "migration", False):
+        return
+    if not getattr(p.args, "compare_dirs", None):
+        p.warnings.append("Миграция пропущена: нужен флаг --compare-dirs для двух срезов.")
+        return
+    base_dir = Path(p.args.compare_dirs[0])
+    target_dir = Path(p.args.compare_dirs[1])
+    tables_base = load_tables(base_dir)
+    tables_target = load_tables(target_dir)
+    tables_base, _ = client_csv.normalize(tables_base)
+    tables_target, _ = client_csv.normalize(tables_target)
+    if p.pii_mode != "off":
+        shared_secret = secrets.token_hex(32)
+        tables_base, _ = sanitize_tables(tables_base, mode=p.pii_mode, secret_key=shared_secret)
+        tables_target, _ = sanitize_tables(tables_target, mode=p.pii_mode, secret_key=shared_secret)
+
+    port_base = tables_base.get("portfolio")
+    if port_base is None:
+        port_base = tables_base.get("accounts")
+    port_target = tables_target.get("portfolio")
+    if port_target is None:
+        port_target = tables_target.get("accounts")
+
+    if port_base is None or port_target is None:
+        p.warnings.append("Миграция пропущена: нет таблицы portfolio в одной из выгрузок.")
+        return
+
+    matrix = migration_matrix(port_base, port_target, mode=p.args.migration_mode)
+
+    if matrix.empty:
+        p.warnings.append("Матрица миграции пуста.")
+        return
+
+    # Format for report
+    frame = matrix.reset_index().rename(columns={"index": "base_bucket"})
+    p.sections.append((
+        f"Миграция PAR-бакетов ({p.args.labels[0]} → {p.args.labels[1]})",
+        frame,
+        f"Режим: {p.args.migration_mode}. Строки = базовый срез, столбцы = целевой срез. Сумма по строке = 100%.",
+    ))
+    p.metrics_payload["sections"]["migration"] = {
+        "matrix": records(frame),
+        "mode": p.args.migration_mode,
+        "labels": p.args.labels,
+        "assumption": "Клиент назначается в худший бакет по его счетам. Сумма по строке = 100%.",
+    }
+
+
+def _stage_vintage(p: _Pipeline) -> None:
+    """Раздел «Винтажный анализ» (--vintage)."""
+    if not getattr(p.args, "vintage", False):
+        return
+
+    portfolio = p.tables.get("portfolio")
+    if portfolio is None or portfolio.empty:
+        p.warnings.append("Винтажный анализ пропущен: нет таблицы portfolio.")
+        return
+
+    clients = p.tables.get("clients")
+    vintage_df = vintage_analysis(portfolio, clients)
+
+    if vintage_df.empty:
+        p.warnings.append("Винтажный анализ: нет данных для расчёта.")
+        return
+
+    frame = vintage_df.reset_index()
+    p.sections.append((
+        "Винтажный анализ: баланс и просрочка по месяцам открытия",
+        frame,
+        "Баланс и PAR считаются на дату среза портфеля. Активные = баланс > 0 и не закрыты.",
+    ))
+    p.metrics_payload["sections"]["vintage"] = {
+        "rows": records(frame),
+        "assumption": "Винтаж = месяц open_date. PAR по dpd на дату среза. Активные счета = balance > 0.",
+    }
+
+
 def _stage_metrics(p: _Pipeline) -> None:
     """Плоские метрики: metrics.json и metrics.csv для сверки значений."""
     # metrics.csv — плоский список чисел для сверки: разделы, ключевые
@@ -1253,9 +1763,9 @@ def _stage_reports(p: _Pipeline) -> None:
 
 def run(args: argparse.Namespace) -> int:
     """Конвейер отчёта: подготовка → загрузка → контроль качества → разделы → отчёты."""
-    data_dir, out_dir, charts_dir, formats = _prepare_dirs(args)
+    data_dir, out_dir, charts_dir, formats, chunksize, config = _prepare_dirs(args)
     p = _Pipeline(args=args, data_dir=data_dir, out_dir=out_dir,
-                  charts_dir=charts_dir, formats=formats)
+                  charts_dir=charts_dir, formats=formats, config=config, chunksize=chunksize)
     _stage_load(p)
     _stage_ab_test(p)
     _stage_quality(p)
@@ -1271,6 +1781,8 @@ def run(args: argparse.Namespace) -> int:
     _stage_macro(p)
     _stage_macro_tables(p)
     _stage_comparison(p)
+    _stage_migration(p)
+    _stage_vintage(p)
     _stage_metrics(p)
     _stage_reports(p)
     return 0

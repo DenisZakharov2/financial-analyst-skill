@@ -39,6 +39,9 @@ market statistics, anomaly detection and trend forecasting with reproducible rep
 | `--ab-metric`, `--ab-metric-type`, `--ab-denominator`, `--ab-pre-metric`, `--ab-group-col`, `--ab-lower-is-better` | Настройка A/B-теста. `--ab-lower-is-better` — для метрик, где меньше значит лучше (PAR, срок, расходы) |
 | `--segment` | Сегментация клиентов: RFM + Risk и кластеризация (`--no-cluster` — без кластеризации) |
 | `--drivers` | PVM и разложение сдвига PAR между срезами, лаговые связи макропоказателей |
+| `--config` | Путь к YAML-конфигу с декларативной настройкой пайплайна (перезаписывается CLI-флагами) |
+| `--source {files,postgres}` | Источник данных: файлы (CSV/Excel) или PostgreSQL (требует `--pg-*` флаги) |
+| `--pg-host`, `--pg-port`, `--pg-database`, `--pg-user`, `--pg-password`, `--pg-schema`, `--pg-chunksize` | Параметры подключения к PostgreSQL (также через ENV: PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD, PGSCHEMA, PGCHUNKSIZE) |
 
 Расширенные расчёты требуют `scipy` (входит в `requirements.txt`). Если пакет не
 установлен, базовый расчёт работает как прежде, а расширенные разделы
@@ -65,6 +68,77 @@ python skills/financial-analyst/scripts/analyze.py \
 
 Требования: Python 3.10+ (проверено на 3.12), зависимости из `requirements.txt`.
 Сеть не нужна: Plotly встраивается в дашборд, шрифт для PDF берётся из matplotlib.
+
+## YAML-конфигурация (--config)
+
+Для повторяемых запусков удобно хранить настройки в YAML-файле:
+
+```yaml
+# config.yaml
+source: files
+data_dir: ./data
+out_dir: ./reports
+output_formats: [docx, pdf, xlsx, pptx, rtf, html]
+title: "Мой отчёт"
+
+forecast_horizon: 6
+forecast_model: auto
+strict: true
+pii_mode: redact
+
+postgres:
+  host: localhost
+  port: 5432
+  database: finanalyst
+  user: analyst
+  password: ""  # лучше задать через PGPASSWORD
+  schema: public
+  chunksize: 10000
+```
+
+```bash
+financial-analyst --config config.yaml
+```
+
+Приоритет настроек: **CLI > YAML > переменные окружения > дефолты**.
+Пример конфига: [`config.yaml.example`](config.yaml.example).
+
+## PostgreSQL как источник данных (--source postgres)
+
+Можно читать таблицы напрямую из PostgreSQL вместо CSV/Excel:
+
+```bash
+financial-analyst \
+  --source postgres \
+  --pg-host localhost \
+  --pg-port 5432 \
+  --pg-database finanalyst \
+  --pg-user analyst \
+  --pg-password "$PGPASSWORD" \
+  --pg-schema public \
+  --out ./reports
+```
+
+Или через переменные окружения (без флагов в командной строке):
+
+```bash
+export PGHOST=localhost
+export PGPORT=5432
+export PGDATABASE=finanalyst
+export PGUSER=analyst
+export PGPASSWORD=secret
+export PGSCHEMA=public
+export PGCHUNKSIZE=10000  # для streaming-режима
+
+financial-analyst --source postgres --out ./reports
+```
+
+Для больших таблиц используйте streaming:
+```bash
+financial-analyst --source postgres --chunksize 5000 --pg-chunksize 5000 --out ./reports
+```
+
+> **Важно:** `macro_survey` (опросы ЦБ РФ) в БД не хранится — для макро-раздела положите `macro_survey.csv` в `data-dir` или используйте `--adapter client`.
 
 ## Установка как скилла Hermes
 

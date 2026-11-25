@@ -8,6 +8,85 @@
 > лаговые связи в сценарии 7 и сценарии 8–10 требуют флагов
 > `--forecast-model`, `--drivers`, `--ab-test`, `--segment`.
 > Без флага эти разделы просто не строятся.
+> Сценарии 13–14: YAML-конфиг и PostgreSQL-источник (версия 2.1.7+).
+
+## Сценарий 13. Декларативная настройка через YAML-конфиг
+
+Для повторяемых запусков (продакшн, CI/CD, разные среды) используйте `--config`:
+
+```yaml
+# config.yaml
+source: files
+data_dir: ./data/prod
+out_dir: ./reports/prod
+output_formats: [docx, pdf, xlsx, html]
+title: "Продакшн-отчёт за Q4 2026"
+
+forecast_horizon: 6
+forecast_model: auto
+strict: true
+pii_mode: redact
+
+quality_thresholds:
+  portfolio_pk_unique: 1.0
+  portfolio_fk_clients: 0.99
+
+postgres:
+  host: db.prod.internal
+  port: 5432
+  database: finanalyst
+  user: analyst
+  schema: public
+  chunksize: 10000
+```
+
+```bash
+# Запуск с конфигом (CLI-флаги перезаписывают YAML)
+financial-analyst --config config.yaml --out ./reports/custom
+```
+
+Приоритет: **CLI > YAML > ENV > defaults**. Переменные окружения (PGHOST, PGPASSWORD и т.д.) удобны для секретов.
+
+---
+
+## Сценарий 14. PostgreSQL как источник данных
+
+Для больших выгрузок и продакшн-среды читайте таблицы напрямую из БД:
+
+```bash
+# Через флаги
+financial-analyst \
+  --source postgres \
+  --pg-host db.internal \
+  --pg-port 5432 \
+  --pg-database finanalyst \
+  --pg-user analyst \
+  --pg-password "$PGPASSWORD" \
+  --pg-schema public \
+  --out ./reports
+```
+
+```bash
+# Через переменные окружения (секреты не в истории команд)
+export PGHOST=db.internal
+export PGPORT=5432
+export PGDATABASE=finanalyst
+export PGUSER=analyst
+export PGPASSWORD=secret
+export PGSCHEMA=public
+export PGCHUNKSIZE=10000
+
+financial-analyst --source postgres --out ./reports
+```
+
+**Streaming для больших таблиц** (чанки по 5000 строк):
+```bash
+financial-analyst --source postgres --chunksize 5000 --pg-chunksize 5000 --out ./reports
+```
+
+> **Важно:** `macro_survey` (опросы ЦБ РФ) в БД не хранится. Для макро-раздела положите `macro_survey.csv` в `data-dir` (для source=files) или используйте `--adapter client` с файлами.
+
+---
 
 ## Сценарий 1. Портфель
 

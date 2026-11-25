@@ -1,0 +1,99 @@
+# Пример конфигурации финансового аналитика (YAML)
+# Сохраните как config.yaml и запустите с флагом --config config.yaml
+#
+# Приоритет настроек: CLI-флаги > YAML-конфиг > переменные окружения > дефолты
+
+# Источник данных: files (CSV/Excel) или postgres (БД)
+source: files
+
+# Каталог с данными (для source=files)
+data_dir: ./assets/sample
+
+# Каталог для результатов
+out_dir: ./reports
+
+# Форматы отчётов
+output_formats:
+  - docx
+  - pdf
+  - xlsx
+  - pptx
+  - rtf
+  - html
+
+# Заголовок отчёта
+title: "Финансовый аналитический отчёт"
+
+# PostgreSQL (для source=postgres)
+postgres:
+  host: localhost
+  port: 5432
+  database: finanalyst
+  user: analyst
+  password: ""  # лучше задать через переменную окружения PGPASSWORD
+  schema: public
+  chunksize: 10000  # для streaming-режима
+
+# Параметры прогноза
+forecast_horizon: 4       # горизонт прогноза, периодов
+forecast_band: 1.0        # границы: ±band × MAE бэктеста
+forecast_model: legacy    # legacy | auto | linear | ets | arx
+
+# Контроль качества
+strict: false             # завершаться с кодом 2 при провале проверок
+pii_mode: strict          # strict | redact | off
+
+# Пороги качества (опционально, переопределяют дефолты)
+quality_thresholds:
+  portfolio_pk_unique: 1.0
+  clients_pk_unique: 1.0
+  products_pk_unique: 1.0
+  portfolio_fk_clients: 0.99
+  portfolio_fk_products: 0.99
+
+# Стриминг (чанковое чтение больших файлов)
+chunksize: 5000  # None = полная загрузка в память
+
+# A/B тест
+ab_test:
+  enabled: false
+  metric: "value"
+  metric_type: "continuous"  # continuous | proportion | ratio
+  denominator: null
+  pre_metric: null
+  group_col: "experiment_group"
+  lower_is_better: false
+
+# Сегментация
+segmentation:
+  enabled: false
+  no_cluster: false
+
+# Когорты
+cohort:
+  enabled: false
+
+# Миграция PAR-бакетов
+migration:
+  enabled: false
+  mode: "clients"  # clients | balance
+
+# Винтажный анализ
+vintage:
+  enabled: false
+
+# Драйверы (PVM, сдвиг PAR, лаговые связи)
+drivers:
+  enabled: false
+  max_lag: 3
+
+# Сравнение двух срезов
+comparison:
+  enabled: false
+  base_dir: ""
+  target_dir: ""
+  labels: ["base", "target"]
+
+# Юнит-экономика
+unit_economics:
+  lifetime_months: 24.0

@@ -1,7 +1,7 @@
 ---
 name: financial-analyst
-description: "Финансовый аналитик для банков, финтеха и смежных сфер: портфель и PAR/NPL, P&L и bridge-сравнение двух выгрузок, воронка и поэтапный TAT с SLA, юнит-экономика (CAC, ARPU, LTV), прогноз, A/B-пилоты и сегментация RFM, макро-опросы ЦБ РФ, защита ПДн и отчёты DOCX, PDF, XLSX, PPTX, RTF, HTML."
-version: 2.1.5
+description: "Финансовый аналитик для банков, финтеха: портфель и PAR/NPL, P&L и bridge-сравнение выгрузок, воронка и TAT с SLA, юнит-экономика (CAC, ARPU, LTV), прогноз, A/B-пилоты, сегментация RFM, макро-опросы ЦБ РФ, защита ПДн, отчёты DOCX/PDF/XLSX/PPTX/RTF/HTML. YAML-конфиг, PostgreSQL-источник, streaming."
+version: 2.1.7
 author: Denis Zakharov (@DenisZakharov2), Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -50,35 +50,43 @@ metadata:
   `pip install -e .` дополнительно даёт команду `financial-analyst`.
 - `scipy` нужен расширенным расчётам (A/B-тесты, тест Грейнджера, ETS). Без него
   базовый расчёт работает как прежде, а расширенные разделы не строятся.
+- PostgreSQL (опционально): для источника данных `--source postgres` нужны
+  `sqlalchemy>=2.0,<3` и `psycopg>=3.1,<4` (extra `postgres` в `pyproject.toml`
+  или `pip install "sqlalchemy>=2.0,<3" "psycopg>=3.1,<4"`).
 - Запускайте с `PYTHONDONTWRITEBYTECODE=1`: иначе в `scripts/` появится
   `__pycache__`, и сканеры безопасности пометят скилл как непрозрачный.
 - Шрифт с кириллицей для PDF: берётся из matplotlib, отдельная установка не нужна.
   Если matplotlib недоступен, положите `DejaVuSans.ttf` в `assets/fonts/`.
 - Сеть не требуется: Plotly встраивается в дашборд, внешних CDN нет.
-- Входные файлы: CSV (UTF-8) или Excel, имена файлов = имена таблиц.
+- Входные файлы: CSV (UTF-8) или Excel, имена файлов = имена таблицы.
 
 ## Workflow
 
 1. **Уточнить задачу.** Цель, решение, продукт, период, формат результата.
    Заполните `templates/brief.md`, если задача не разовая.
    *Критерий: известны период, разрез, формат и что считается результатом.*
-2. **Проверить данные и ПДн.** Запустите `scripts/analyze.py` с `--strict`
+2. **Подготовить конфиг (опционально).** Создайте `config.yaml` с настройками источника,
+   прогноза, форматов вывода и порогов качества. Пример — `config.yaml.example`.
+   *Критерий: конфиг валиден, приоритет CLI > YAML > ENV > defaults понятен.*
+3. **Проверить данные и ПДн.** Запустите `scripts/analyze.py` с `--strict`
    (или `--pii-mode=redact` для автоматического удаления колонок ПДн и HMAC-псевдонимизации ключей).
+   Для PostgreSQL: `--source postgres --pg-host ... --pg-database ...` (или ENV PGHOST, PGDATABASE...).
    *Критерий: в консоли 0 fail; предупреждения объяснены.*
-3. **Согласовать метрики.** Выберите нужные из `references/metric-contracts.md`.
+4. **Согласовать метрики.** Выберите нужные из `references/metric-contracts.md`.
    *Критерий: у каждой метрики понятны зерно, знаменатель и краевой случай.*
-4. **Посчитать.** Скрипт пишет `metrics.json`, `metrics.csv`, графики и отчёты.
+5. **Посчитать.** Скрипт пишет `metrics.json`, `metrics.csv`, графики и отчёты.
    Расширенные расчёты включаются флагами: `--forecast-model auto` (каскад прогноза),
    `--segment` (RFM + Risk и кластеры), `--ab-test` (оценка пилота),
    `--drivers` (PVM, сдвиг PAR, лаговые связи макропоказателей),
    `--cohort` (старт когорты и retention-кривые по возрасту в месяцах).
+   Для больших выгрузок: `--chunksize N` (streaming CSV) или `--pg-chunksize N` (streaming PostgreSQL).
    *Критерий: `metrics.json` содержит разделы и допущения, код возврата 0.*
-5. **Сверить числа.** Сравните headline-показатели с `metrics.csv`
+6. **Сверить числа.** Сравните headline-показатели с `metrics.csv`
    (разделы «Ключевые показатели» и «Юнит-экономика»).
    *Критерий: каждое число в тексте есть в `metrics.json`.*
-6. **Написать выводы.** Используйте `templates/report.md.tmpl`.
+7. **Написать выводы.** Используйте `templates/report.md.tmpl`.
    *Критерий: методология, допущения, интерпретация, риски, следующие шаги.*
-7. **Отдать файлы.** Проверьте, что отчёт открывается и графики на месте.
+8. **Отдать файлы.** Проверьте, что отчёт открывается и графики на месте.
    *Критерий: чек-лист из раздела «Проверка результата» пройден.*
 
 ## Входные данные
@@ -93,6 +101,10 @@ metadata:
 CSV, XLS, XLSX. Широкие листы Excel разбираются адаптером `cbr_survey`: в режиме
 `auto` он ищет книгу `stat_*.xlsx`, для другого имени нужен `--adapter cbr`.
 Если таблицы нет, раздел пропускается с предупреждением, а не с нулём.
+
+**Источник данных:**
+- **Файлы (по умолчанию):** `--source files --data-dir ./data` — CSV/Excel в каталоге.
+- **PostgreSQL:** `--source postgres --pg-host ... --pg-database ...` (или ENV PGHOST, PGDATABASE, PGUSER, PGPASSWORD, PGPORT, PGSCHEMA). Читает таблицы из схемы `public` (или `--pg-schema`). `macro_survey` в БД не хранится — для макро-раздела используйте файлы.
 
 Опциональные поля для A/B: `experiment_group` (`control`/`treatment`), `pre_value`, `deals`.
 Они читаются только при запуске с `--ab-test`.
@@ -176,6 +188,8 @@ python scripts/check_skill.py
 | `references/design-guide.md` | Палитра, типографика, графики |
 | `references/style-ru.md` | Языковые правила и линтер |
 | `references/examples.md` | Примеры запросов |
+| `scripts/finanalyst/config.py` | YAML-конфиг пайплайна (`PipelineConfig`, `merge_configs`) |
+| `scripts/finanalyst/adapters/postgres.py` | PostgreSQL-адаптер (SQLAlchemy, streaming) |
 | `scripts/analyze.py` | CLI: расчёт и отчёты |
 | `scripts/check_skill.py` | Проверка самого скилла |
 | `templates/brief.md` | Бриф перед анализом |

@@ -274,3 +274,102 @@ def test_metrics_csv_has_header_for_empty_run(tmp_path):
                  "--quiet"]) == 0
     frame = pd.read_csv(out / "metrics.csv", encoding="utf-8-sig")
     assert list(frame.columns) == ["section", "metric", "dimension", "value"]
+
+
+def test_streaming_chunksize_matches_regular(sample_dir, tmp_path, date_strings_fixture):
+    """Стриминг с --chunksize даёт те же метрики, что и полная загрузка."""
+    # Сначала обычный прогон
+    out_regular = tmp_path / "regular"
+    assert main(["--data-dir", str(sample_dir), "--out", str(out_regular),
+                 "--format", "xlsx", "--quiet"]) == 0
+    regular_metrics = json.loads((out_regular / "metrics.json").read_text(encoding="utf-8"))
+
+    # Потом стриминг с чанками
+    out_stream = tmp_path / "streaming"
+    assert main(["--data-dir", str(sample_dir), "--out", str(out_stream),
+                 "--format", "xlsx", "--quiet", "--chunksize", "50"]) == 0
+    stream_metrics = json.loads((out_stream / "metrics.json").read_text(encoding="utf-8"))
+
+    # Сравниваем ключевые метрики (должны совпадать точно)
+    for section in ("portfolio", "finance", "unit_economics"):
+        reg_totals = regular_metrics["sections"][section].get("totals", {})
+        str_totals = stream_metrics["sections"][section].get("totals", {})
+        for key in set(reg_totals) | set(str_totals):
+            v1 = reg_totals.get(key)
+            v2 = str_totals.get(key)
+            if isinstance(v1, float) and isinstance(v2, float):
+                assert v1 == pytest.approx(v2, rel=1e-6), f"{section}.{key}: {v1} vs {v2}"
+            else:
+                assert v1 == v2, f"{section}.{key}: {v1} vs {v2}"
+
+
+def test_streaming_large_dataset(tmp_path, date_strings_fixture):
+    """Синтетический датасет >100k строк: стриминг работает и метрики валидны."""
+    data = tmp_path / "large"
+    data.mkdir()
+
+    # Генерируем ~120k строк portfolio
+    import numpy as np
+    np.random.seed(42)
+    n_rows = 120_000
+    _ = date_strings_fixture("2023-01", 24)
+    portfolio = pd.DataFrame({
+        "account_id": [f"A{i:06d}" for i in range(n_rows)],
+        "client_id": [f"C{i % 5000:05d}" for i in range(n_rows)],
+        "product_code": np.random.choice(["P1", "P2", "P3"], n_rows),
+        "balance": np.random.exponential(10000, n_rows).round(2),
+        "limit_amount": np.random.exponential(15000, n_rows).round(2),
+        "dpd": np.random.choice([0, 5, 15, 35, 65, 95, 120], n_rows, p=[0.7, 0.1, 0.05, 0.05, 0.05, 0.03, 0.02]),
+    })
+    portfolio.to_csv(data / "portfolio.csv", index=False)
+
+    # clients - даты регистрации должны попадать в окно finance (2024-01..2024-06)
+    reg_dates = date_strings_fixture("2023-06", 18)  # июн 2023 - ноя 2024
+    clients = pd.DataFrame({
+        "client_id": [f"C{i:05d}" for i in range(5000)],
+        "registration_date": [reg_dates[i % len(reg_dates)] for i in range(5000)],
+    })
+    clients.to_csv(data / "clients.csv", index=False)
+
+    # products
+    products = pd.DataFrame({
+        "product_code": ["P1", "P2", "P3"],
+        "product_type": ["карта", "кредит", "депозит"],
+    })
+    products.to_csv(data / "products.csv", index=False)
+
+    # finance (6 периодов: 2024-01..2024-06)
+    finance_periods = date_strings_fixture("2024-01", 6)
+    finance_rows = []
+    for period in finance_periods:
+        for pc in ["P1", "P2", "P3"]:
+            finance_rows.append({
+                "period": period,
+                "product_code": pc,
+                "interest_income": np.random.uniform(50000, 200000),
+                "fee_income": np.random.uniform(5000, 20000),
+                "funding_cost": np.random.uniform(10000, 50000),
+                "reserve_expense": np.random.uniform(5000, 20000),
+                "opex": np.random.uniform(10000, 30000),
+                "marketing_cost": np.random.uniform(5000, 15000),
+            })
+    pd.DataFrame(finance_rows).to_csv(data / "finance.csv", index=False)
+
+    # Запуск в стриминг-режиме с chunksize=5000
+    out = tmp_path / "out"
+    assert main(["--data-dir", str(data), "--out", str(out),
+                 "--format", "xlsx", "--quiet", "--chunksize", "5000"]) == 0
+
+    metrics = json.loads((out / "metrics.json").read_text(encoding="utf-8"))
+
+    # Проверяем, что метрики посчитались и выглядят разумно
+    assert metrics["sections"]["portfolio"]["totals"]["accounts"] == n_rows
+    assert metrics["sections"]["portfolio"]["totals"]["total_balance"] > 0
+    assert 0 <= metrics["sections"]["portfolio"]["totals"]["par30_pct"] <= 100
+    assert metrics["sections"]["finance"]["totals"]["revenue"] > 0
+    assert metrics["sections"]["unit_economics"]["arpu"] is not None
+    assert metrics["sections"]["unit_economics"]["cac"] is not None
+
+    # Проверяем, что в notes есть упоминание стриминг-режима
+    assert any("Streaming-режим" in note for note in metrics["notes"])
+    assert any("Обработано чанков" in note for note in metrics["notes"])

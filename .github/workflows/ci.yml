@@ -47,3 +47,103 @@ jobs:
 
       - name: Verify CLI entry point
         run: financial-analyst --help
+
+  postgres-integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: testuser
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: testdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U testuser -d testdb"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies (with postgres extras)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest ruff pypdf pytest-cov mypy
+          pip install "sqlalchemy>=2.0,<3" "psycopg>=3.1,<4"
+          pip install --no-deps -e .
+
+      - name: Wait for PostgreSQL
+        run: |
+          for i in {1..30}; do
+            pg_isready -h localhost -p 5432 -U testuser -d testdb && break
+            sleep 1
+          done
+
+      - name: Setup test database schema
+        run: |
+          PGPASSWORD=testpass psql -h localhost -U testuser -d testdb -c "
+            CREATE TABLE portfolio (
+              client_id TEXT,
+              account_id TEXT,
+              product_code TEXT,
+              balance NUMERIC,
+              dpd INTEGER,
+              par_bucket TEXT,
+              period_start DATE
+            );
+            CREATE TABLE clients (
+              client_id TEXT PRIMARY KEY,
+              region TEXT,
+              segment TEXT,
+              registration_date DATE
+            );
+            CREATE TABLE products (
+              product_code TEXT PRIMARY KEY,
+              product_name TEXT,
+              product_type TEXT
+            );
+            CREATE TABLE finance (
+              period TEXT,
+              product_code TEXT,
+              revenue NUMERIC,
+              cost NUMERIC
+            );
+            CREATE TABLE funnel_events (
+              application_id TEXT,
+              client_id TEXT,
+              stage TEXT,
+              timestamp TIMESTAMP
+            );
+            CREATE TABLE sales (
+              client_id TEXT,
+              product_code TEXT,
+              amount NUMERIC,
+              deals INTEGER,
+              period TEXT
+            );
+          "
+
+      - name: Load sample data into PostgreSQL
+        run: |
+          PGPASSWORD=testpass psql -h localhost -U testuser -d testdb -c "\copy portfolio FROM 'skills/financial-analyst/assets/sample/portfolio.csv' CSV HEADER"
+          PGPASSWORD=testpass psql -h localhost -U testuser -d testdb -c "\copy clients FROM 'skills/financial-analyst/assets/sample/clients.csv' CSV HEADER"
+          PGPASSWORD=testpass psql -h localhost -U testuser -d testdb -c "\copy products FROM 'skills/financial-analyst/assets/sample/products.csv' CSV HEADER"
+          PGPASSWORD=testpass psql -h localhost -U testuser -d testdb -c "\copy finance FROM 'skills/financial-analyst/assets/sample/finance.csv' CSV HEADER"
+          PGPASSWORD=testpass psql -h localhost -U testuser -d testdb -c "\copy funnel_events FROM 'skills/financial-analyst/assets/sample/funnel_events.csv' CSV HEADER"
+          PGPASSWORD=testpass psql -h localhost -U testuser -d testdb -c "\copy sales FROM 'skills/financial-analyst/assets/sample/sales.csv' CSV HEADER"
+
+      - name: Run PostgreSQL integration tests
+        env:
+          PGHOST: localhost
+          PGPORT: 5432
+          PGDATABASE: testdb
+          PGUSER: testuser
+          PGPASSWORD: testpass
+        run: pytest -q tests/test_postgres.py --cov=finanalyst.adapters.postgres --cov-report=term-missing

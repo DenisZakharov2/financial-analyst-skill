@@ -1,5 +1,42 @@
 # Changelog
 
+## 2.1.7 — 2026-11-24
+
+**Добавлено**
+
+- **YAML-конфигурация пайплайна** (`finanalyst/config.py`):
+  - `PipelineConfig` — dataclass со всеми параметрами: source, data_dir, postgres, forecast, quality, output_formats, chunksize, ab_test, segmentation, cohort, migration, vintage, drivers, comparison, unit_economics.
+  - `merge_configs()` — мердж конфигов с приоритетом: **CLI > YAML > ENV > defaults**.
+  - CLI-флаг `--config` — путь к YAML-файлу.
+- **PostgreSQL-адаптер** (`finanalyst/adapters/postgres.py`):
+  - `PostgresConfig` — конфигурация подключения (host, port, database, user, password, schema, chunksize).
+  - `load_tables_postgres()` — полная загрузка известных таблиц через SQLAlchemy.
+  - `load_tables_postgres_streaming()` — итеративное чтение чанками для больших таблиц.
+  - `get_postgres_config()` — сбор конфига из приоритетов: CLI (`--pg-*`), YAML (`postgres:`), ENV (PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD, PGSCHEMA, PGCHUNKSIZE), defaults.
+  - CLI-флаги: `--source {files,postgres}`, `--pg-host`, `--pg-port`, `--pg-database`, `--pg-user`, `--pg-password`, `--pg-schema`, `--pg-chunksize`.
+- **CI/CD для PostgreSQL** (`.github/workflows/ci.yml`):
+  - Job `postgres-integration` с PostgreSQL 16 service container.
+  - Интеграционные тесты `tests/test_postgres.py` на реальной БД.
+- **Зависимости**: `sqlalchemy>=2.0,<3`, `psycopg>=3.1,<4` в `requirements.txt`, `requirements.lock.txt`, optional group `postgres` в `pyproject.toml`.
+- `config.yaml.example` — пример конфигурации со всеми параметрами.
+
+**Исправлено**
+
+- Обратная совместимость: запуск без `--config` и с `--source files` работает как раньше.
+- Все существующие тесты проходят (224 passed).
+
+## 2.1.6 — 2026-11-24
+
+**Добавлено**
+
+- `finanalyst/migration.py` — новый модуль с функциями `migration_matrix()` (матрица переходов PAR-бакетов между двумя срезами портфеля) и `vintage_analysis()` (винтажный анализ: баланс и доля просрочки по месяцам открытия счёта).
+- CLI-флаги:
+  - `--migration` + `--compare-dirs` — матрица миграции PAR-бакетов (режим `--migration-mode clients|balance`).
+  - `--vintage` — винтажный анализ на текущем срезе.
+- `references/migration.md` — соглашения: PAR-бакеты, обработка закрытых счетов, календарь, краевые случаи.
+- `references/metric-contracts.md` — новые строки контракта: `migration_matrix_pct`, `vintage_balance`, `vintage_par30_pct`, `vintage_par60_pct`, `vintage_par90_pct`, `vintage_active_rate_pct`.
+- Тесты: `tests/test_migration.py` (7 тестов: матрица, сумма строк=100%, режимы clients/balance, пропуск без compare-dirs, без portfolio, отчёты) и `tests/test_vintage.py` (10 тестов: структура, сумма балансов=портфель, диапазоны PAR, монотонность винтажей, контракт par30≥par60≥par90, отчёты).
+
 ## 2.1.5 — 2026-11-23
 
 **Добавлено**

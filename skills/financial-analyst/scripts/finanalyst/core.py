@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Iterator
 
 import numpy as np
 import pandas as pd
@@ -115,6 +116,93 @@ def load_tables(data_dir: Path, skip_patterns: tuple[str, ...] = ()) -> dict[str
     if errors:
         raise DataLoadError(errors, tables)
     return tables
+
+
+def load_tables_streaming(
+    data_dir: Path,
+    chunksize: int,
+    skip_patterns: tuple[str, ...] = (),
+) -> Iterator[dict[str, pd.DataFrame]]:
+    """Итеративное чтение CSV файлов чанками для обработки больших выгрузок.
+
+    Возвращает генератор, который выдает словарь таблиц для каждого чанка.
+    Excel файлы читаются целиком (не поддерживают чанковое чтение).
+
+    ``chunksize`` — количество строк в чанке.
+    ``skip_patterns`` — префиксы имён файлов для пропуска.
+
+    Возвращает: Iterator[dict[str, pd.DataFrame]] — по одному чанку для каждой таблицы.
+    """
+    if not data_dir.exists():
+        raise FileNotFoundError(f"Каталог с данными не найден: {data_dir}")
+
+    # Сначала собираем все CSV файлы и их разделители/кодировки
+    csv_files: dict[str, tuple[Path, str | None, str]] = {}  # name -> (path, separator, encoding)
+    excel_files: dict[str, Path] = {}
+
+    for path in sorted(data_dir.iterdir()):
+        if not path.is_file():
+            continue
+        if path.suffix.lower() not in TEXT_SUFFIXES:
+            continue
+        if any(path.stem.startswith(pattern) for pattern in skip_patterns):
+            continue
+        name = path.stem.strip().lower().replace("ё", "е")
+        if path.suffix.lower() == ".csv":
+            separator = _detect_separator(path)
+            # Определяем кодировку
+            encoding_used = CSV_ENCODINGS[0]
+            for encoding in CSV_ENCODINGS:
+                try:
+                    if separator:
+                        pd.read_csv(path, sep=separator, encoding=encoding, nrows=1)
+                    else:
+                        pd.read_csv(path, encoding=encoding, nrows=1)
+                    encoding_used = encoding
+                    break
+                except UnicodeDecodeError:
+                    continue
+                except Exception:
+                    break
+            csv_files[name] = (path, separator, encoding_used)
+        else:
+            excel_files[name] = path
+
+    # Читаем Excel файлы сразу (они обычно небольшие)
+    excel_tables: dict[str, pd.DataFrame] = {}
+    for name, path in excel_files.items():
+        try:
+            excel_tables[name] = pd.read_excel(path, sheet_name=0)
+        except Exception as exc:
+            raise DataLoadError([f"{path.name}: {type(exc).__name__}: {exc}"], {})
+
+    # Создаем читатели для CSV файлов
+    readers: dict[str, pd.io.parsers.readers.TextFileReader] = {}
+    for name, (path, separator, encoding) in csv_files.items():
+        try:
+            if separator:
+                readers[name] = pd.read_csv(
+                    path, sep=separator, encoding=encoding, chunksize=chunksize
+                )
+            else:
+                readers[name] = pd.read_csv(path, encoding=encoding, chunksize=chunksize)
+        except Exception as exc:
+            raise DataLoadError([f"{path.name}: {type(exc).__name__}: {exc}"], {})
+
+    # Итеративно выдаем чанки
+    active_readers = set(readers.keys())
+    while active_readers:
+        chunk_tables = dict(excel_tables)  # Excel таблицы в каждом чанке
+        to_remove = set()
+        for name in active_readers:
+            try:
+                chunk = next(readers[name])
+                chunk_tables[name] = chunk
+            except StopIteration:
+                to_remove.add(name)
+        active_readers -= to_remove
+        if chunk_tables:
+            yield chunk_tables
 
 
 class DataLoadError(RuntimeError):
