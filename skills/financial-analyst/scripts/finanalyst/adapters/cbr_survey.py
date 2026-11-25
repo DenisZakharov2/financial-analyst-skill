@@ -6,10 +6,10 @@
 
 from __future__ import annotations
 
+import math
 import re
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 SKIP_SHEET_MARKERS = ("спецификац", "участник", "оглавление", "содержание")
@@ -18,7 +18,7 @@ MAX_HEADER_SCAN = 7
 
 
 def _clean(value) -> str:
-    if value is None or (isinstance(value, float) and np.isnan(value)):
+    if value is None or (isinstance(value, float) and math.isnan(value)):
         return ""
     return re.sub(r"\s+", " ", str(value)).strip()
 
