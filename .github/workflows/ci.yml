@@ -43,7 +43,7 @@ jobs:
         run: python skills/financial-analyst/scripts/check_skill.py
 
       - name: Tests
-        run: pytest -q --cov=finanalyst --cov-report=term-missing
+        run: pytest -q --cov=finanalyst --cov-report=term-missing -k "not postgres"
 
       - name: Verify CLI entry point
         run: financial-analyst --help
@@ -100,8 +100,7 @@ jobs:
               currency TEXT,
               status TEXT,
               dpd INTEGER,
-              par_bucket TEXT,
-              period_start DATE
+              par_bucket TEXT
             );
             CREATE TABLE clients (
               client_id TEXT PRIMARY KEY,
