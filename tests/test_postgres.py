@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 
 import pytest
+from sqlalchemy import text
 
 # Пропускаем если нет postgres зависимостей
 pytest.importorskip("sqlalchemy")
@@ -51,7 +52,7 @@ def pg_engine(pg_config):
 def test_postgres_connection(pg_engine):
     """Базовое соединение с БД работает."""
     with pg_engine.connect() as conn:
-        result = conn.execute("SELECT 1")
+        result = conn.execute(text("SELECT 1"))
         assert result.scalar() == 1
 
 
@@ -59,10 +60,12 @@ def test_postgres_connection(pg_engine):
 def test_postgres_list_tables(pg_config, pg_engine):
     """Видим созданные тестовые таблицы."""
     with pg_engine.connect() as conn:
-        conn.execute("SET search_path TO public")
+        conn.execute(text("SET search_path TO public"))
         result = conn.execute(
-            "SELECT table_name FROM information_schema.tables "
-            "WHERE table_schema = 'public' AND table_type = 'BASE TABLE'"
+            text(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = 'public' AND table_type = 'BASE TABLE'"
+            )
         )
         tables = {row[0] for row in result}
 
@@ -272,10 +275,12 @@ def test_postgres_known_tables_loaded(pg_config):
 
     engine = postgres.create_engine_from_config(pg_config)
     with engine.connect() as conn:
-        conn.execute("SET search_path TO public")
+        conn.execute(text("SET search_path TO public"))
         result = conn.execute(
-            "SELECT table_name FROM information_schema.tables "
-            "WHERE table_schema = 'public' AND table_type = 'BASE TABLE'"
+            text(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = 'public' AND table_type = 'BASE TABLE'"
+            )
         )
         existing = {row[0].lower() for row in result}
     engine.dispose()
