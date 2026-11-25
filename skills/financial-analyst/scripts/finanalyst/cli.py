@@ -92,10 +92,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--forecast-h", type=int, default=4, help="Горизонт прогноза, периодов")
     parser.add_argument("--band", type=float, default=1.0,
                         help="Границы прогноза: ±band × MAE бэктеста")
-    parser.add_argument("--forecast-model", choices=["legacy", "auto", "linear", "ets", "arx"],
+    parser.add_argument("--forecast-model", choices=["legacy", "auto", "linear", "ets", "arx", "sarimax"],
                         default="legacy",
                         help="Модель прогноза: legacy — линейный тренд (по умолчанию), auto — выбор "
-                             "модели на бэктесте, linear/ets/arx — фиксированная модель")
+                             "модели на бэктесте, linear/ets/arx/sarimax — фиксированная модель")
     parser.add_argument("--ab-test", action="store_true",
                         help="Оценить A/B-тест: SRM, тест Уэлча, CUPED, линеаризация ratio-метрик")
     parser.add_argument("--ab-metric", default="value",

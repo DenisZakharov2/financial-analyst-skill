@@ -34,7 +34,7 @@ market statistics, anomaly detection and trend forecasting with reproducible rep
 
 | Флаг | Что делает |
 |---|---|
-| `--forecast-model legacy\|auto\|linear\|ets\|arx` | Каскад моделей прогноза с выбором на бэктесте (`legacy` — линейный тренд, по умолчанию) |
+| `--forecast-model legacy\|auto\|linear\|ets\|arx\|sarimax` | Каскад моделей прогноза с выбором на бэктесте (`legacy` — линейный тренд, по умолчанию) |
 | `--ab-test` | A/B-тест: SRM, тест Уэлча и Манна — Уитни, CUPED, линеаризация ratio-метрик |
 | `--ab-metric`, `--ab-metric-type`, `--ab-denominator`, `--ab-pre-metric`, `--ab-group-col`, `--ab-lower-is-better` | Настройка A/B-теста. `--ab-lower-is-better` — для метрик, где меньше значит лучше (PAR, срок, расходы) |
 | `--segment` | Сегментация клиентов: RFM + Risk и кластеризация (`--no-cluster` — без кластеризации) |

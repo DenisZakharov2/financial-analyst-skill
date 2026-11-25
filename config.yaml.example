@@ -37,7 +37,7 @@ postgres:
 # Параметры прогноза
 forecast_horizon: 4       # горизонт прогноза, периодов
 forecast_band: 1.0        # границы: ±band × MAE бэктеста
-forecast_model: legacy    # legacy | auto | linear | ets | arx
+forecast_model: legacy    # legacy | auto | linear | ets | arx | sarimax
 
 # Контроль качества
 strict: false             # завершаться с кодом 2 при провале проверок

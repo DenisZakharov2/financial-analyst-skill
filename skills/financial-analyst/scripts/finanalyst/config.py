@@ -23,7 +23,7 @@ class PipelineConfig:
     # Параметры прогноза
     forecast_horizon: int = 4
     forecast_band: float = 1.0
-    forecast_model: str = "legacy"  # legacy | auto | linear | ets | arx
+    forecast_model: str = "legacy"  # legacy | auto | linear | ets | arx | sarimax
 
     # Параметры качества
     strict: bool = False

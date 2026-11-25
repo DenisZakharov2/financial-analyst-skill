@@ -24,6 +24,11 @@ try:  # scipy нужен только для оптимизации параме
 except ImportError:  # pragma: no cover - зависит от окружения
     optimize = None
 
+try:  # statsmodels для SARIMAX (опциональная зависимость)
+    from statsmodels.tsa.statespace.sarimax import SARIMAX
+except ImportError:  # pragma: no cover - опциональная зависимость
+    SARIMAX = None
+
 
 def _to_datetime(values) -> pd.Series:
     """Разобрать значения периода в даты через общий парсер пакета."""
@@ -156,6 +161,102 @@ def _fit_predict_arx(
         preds[step] = pred
         last_y = pred
     return preds
+
+
+def _fit_predict_sarimax(
+    y_train: np.ndarray,
+    h: int,
+    seasonal_period: int | None = None,
+    exog_train: np.ndarray | None = None,
+    exog_future: np.ndarray | None = None,
+) -> np.ndarray:
+    """SARIMAX прогноз (Seasonal ARIMA с экзогенными переменными).
+
+    Использует statsmodels SARIMAX с автоматическим подбором порядков
+    через information criteria (AIC) на обучающей выборке.
+    """
+    if SARIMAX is None:
+        # statsmodels не установлен — фоллбэк на линейный тренд
+        return _fit_predict_linear(y_train, h)
+
+    n = len(y_train)
+    # Минимальная длина для SARIMAX: нужно оценить несколько параметров
+    if n < 8:
+        return _fit_predict_linear(y_train, h)
+
+    # Определяем сезонный период
+    use_seasonal = seasonal_period is not None and n >= 2 * seasonal_period
+    if use_seasonal:
+        assert seasonal_period is not None
+        m = int(seasonal_period)
+    else:
+        m = 1
+
+    has_exog = (
+        exog_train is not None
+        and exog_future is not None
+        and len(exog_train) == n
+        and len(exog_future) >= h
+    )
+
+    # Подбираем порядки (p, d, q) и (P, D, Q, m) через AIC
+    # Ограничиваем пространство поиска для скорости
+    best_aic = np.inf
+    best_order = (1, 1, 1)
+    best_seasonal_order = (0, 0, 0, m)
+
+    # Простой grid search по разумным порядкам
+    # Non-seasonal: p in [0,1,2], d in [0,1], q in [0,1,2]
+    # Seasonal: P in [0,1], D in [0,1], Q in [0,1]
+    non_seasonal_orders = [
+        (0, 0, 0), (0, 0, 1), (0, 1, 0), (0, 1, 1),
+        (1, 0, 0), (1, 0, 1), (1, 1, 0), (1, 1, 1),
+        (2, 0, 0), (2, 0, 1), (2, 1, 0), (2, 1, 1),
+    ]
+    seasonal_orders = [
+        (0, 0, 0, m), (0, 0, 1, m), (0, 1, 0, m), (0, 1, 1, m),
+        (1, 0, 0, m), (1, 0, 1, m), (1, 1, 0, m), (1, 1, 1, m),
+    ] if use_seasonal else [(0, 0, 0, m)]
+
+    for order in non_seasonal_orders:
+        for s_order in seasonal_orders:
+            try:
+                mod = SARIMAX(
+                    y_train,
+                    exog=exog_train if has_exog else None,
+                    order=order,
+                    seasonal_order=s_order,
+                    enforce_stationarity=False,
+                    enforce_invertibility=False,
+                )
+                res = mod.fit(disp=False, method="lbfgs", maxiter=200)
+                if res.aic < best_aic:
+                    best_aic = res.aic
+                    best_order = order
+                    best_seasonal_order = s_order
+            except Exception:  # noqa: BLE001
+                continue
+
+    # Финальная модель с лучшими порядками
+    try:
+        mod = SARIMAX(
+            y_train,
+            exog=exog_train if has_exog else None,
+            order=best_order,
+            seasonal_order=best_seasonal_order,
+            enforce_stationarity=False,
+            enforce_invertibility=False,
+        )
+        res = mod.fit(disp=False, method="lbfgs", maxiter=500)
+    except Exception:  # noqa: BLE001
+        return _fit_predict_linear(y_train, h)
+
+    # Прогноз
+    try:
+        forecast = res.forecast(steps=h, exog=exog_future if has_exog else None)
+        return np.asarray(forecast, dtype=float)
+    except Exception:  # noqa: BLE001
+        return _fit_predict_linear(y_train, h)
 
 
 def _compute_metrics(actual: np.ndarray, predicted: np.ndarray, y_insample: np.ndarray) -> dict:
@@ -291,6 +392,9 @@ def forecast_advanced(
             candidate_methods.append("ets")
         if n >= 8 or (exog_mat is not None and exog_fut_mat is not None):
             candidate_methods.append("arx")
+        # SARIMAX требует statsmodels и минимум 8 точек для сезонности
+        if SARIMAX is not None and n >= 8:
+            candidate_methods.append("sarimax")
 
     folds = min(4, max(1, n // 3))
     start_train = n - folds
@@ -300,6 +404,8 @@ def forecast_advanced(
         seasonal_p = None
     if method == "auto" and "arx" in candidate_methods and start_train < 5:
         candidate_methods.remove("arx")
+    if method == "auto" and "sarimax" in candidate_methods and start_train < 8:
+        candidate_methods.remove("sarimax")
 
     def _run_candidate(name: str, train_y: np.ndarray, step_h: int, idx_end: int) -> np.ndarray:
         if name == "ets":
@@ -312,6 +418,14 @@ def forecast_advanced(
                 else exog_fut_mat
             )
             return _fit_predict_arx(train_y, step_h, ex_tr, ex_fu)
+        if name == "sarimax":
+            ex_tr = exog_mat[:idx_end] if exog_mat is not None else None
+            ex_fu = (
+                exog_mat[idx_end: idx_end + step_h]
+                if (exog_mat is not None and idx_end + step_h <= n)
+                else exog_fut_mat
+            )
+            return _fit_predict_sarimax(train_y, step_h, seasonal_period=seasonal_p, exog_train=ex_tr, exog_future=ex_fu)
         return _fit_predict_linear(train_y, step_h)
 
     model_scores: dict[str, dict] = {}
@@ -335,6 +449,8 @@ def forecast_advanced(
         base_forecast = _fit_predict_damped_holt(y, horizon, seasonal_period=seasonal_p)
     elif best_method == "arx":
         base_forecast = _fit_predict_arx(y, horizon, exog_mat, exog_fut_mat)
+    elif best_method == "sarimax":
+        base_forecast = _fit_predict_sarimax(y, horizon, seasonal_period=seasonal_p, exog_train=exog_mat, exog_future=exog_fut_mat)
     else:
         base_forecast = _fit_predict_linear(y, horizon)
 
