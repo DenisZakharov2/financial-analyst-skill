@@ -82,6 +82,17 @@ migration:
 vintage:
   enabled: false
 
+# Кредитный риск
+credit_risk:
+  enabled: false
+  pd_calibration_a: 3.0        # intercept for score->PD logistic (PD = 1/(1+exp(a+b*score)))
+  pd_calibration_b: -0.01      # slope for score->PD logistic (negative: higher score = lower PD)
+  default_pd: 0.02             # default PD if no score
+  default_lgd: 0.45            # default LGD (45%)
+  ccf: 0.5                     # credit conversion factor for undrawn
+  asset_correlation: 0.24      # Basel asset correlation
+  maturity: 2.5                # maturity in years
+
 # Драйверы (PVM, сдвиг PAR, лаговые связи)
 drivers:
   enabled: false

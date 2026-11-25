@@ -39,6 +39,7 @@ market statistics, anomaly detection and trend forecasting with reproducible rep
 | `--ab-metric`, `--ab-metric-type`, `--ab-denominator`, `--ab-pre-metric`, `--ab-group-col`, `--ab-lower-is-better` | Настройка A/B-теста. `--ab-lower-is-better` — для метрик, где меньше значит лучше (PAR, срок, расходы) |
 | `--segment` | Сегментация клиентов: RFM + Risk и кластеризация (`--no-cluster` — без кластеризации) |
 | `--drivers` | PVM и разложение сдвига PAR между срезами, лаговые связи макропоказателей |
+| `--credit-risk` | Кредитный риск: PD/LGD/EAD, Expected Loss, RWA (Basel IRB) |
 | `--config` | Путь к YAML-конфигу с декларативной настройкой пайплайна (перезаписывается CLI-флагами) |
 | `--source {files,postgres}` | Источник данных: файлы (CSV/Excel) или PostgreSQL (требует `--pg-*` флаги) |
 | `--pg-host`, `--pg-port`, `--pg-database`, `--pg-user`, `--pg-password`, `--pg-schema`, `--pg-chunksize` | Параметры подключения к PostgreSQL (также через ENV: PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD, PGSCHEMA, PGCHUNKSIZE) |

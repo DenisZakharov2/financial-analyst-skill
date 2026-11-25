@@ -53,6 +53,9 @@ class PipelineConfig:
     # Винтаж
     vintage: dict[str, Any] = field(default_factory=dict)
 
+    # Кредитный риск
+    credit_risk: dict[str, Any] = field(default_factory=dict)
+
     # Драйверы
     drivers: dict[str, Any] = field(default_factory=dict)
 
@@ -80,7 +83,7 @@ class PipelineConfig:
             "forecast_horizon", "forecast_band", "forecast_model",
             "strict", "pii_mode", "quality_thresholds", "output_formats",
             "chunksize", "ab_test", "segmentation", "cohort",
-            "migration", "vintage", "drivers", "comparison", "title",
+            "migration", "vintage", "credit_risk", "drivers", "comparison", "title",
         }
         filtered = {k: v for k, v in data.items() if k in known_fields}
         return cls(**filtered)
@@ -104,6 +107,7 @@ class PipelineConfig:
             "cohort": self.cohort,
             "migration": self.migration,
             "vintage": self.vintage,
+            "credit_risk": self.credit_risk,
             "drivers": self.drivers,
             "comparison": self.comparison,
             "title": self.title,

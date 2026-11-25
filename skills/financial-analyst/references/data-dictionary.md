@@ -39,17 +39,21 @@
 
 | Поле | Тип | Обяз. | Описание | Пример |
 |---|---|---|---|---|
-| account_id | string | да | Уникальный идентификатор счёта | AC-99887 |
-| client_id | string | да | Ссылка на clients | C-12345 |
-| product_code | string | да | Ссылка на products | CC-01 |
-| open_date | date | нет | Дата открытия | 2024-02-10 |
-| close_date | date | нет | Дата закрытия | 2024-11-01 |
-| limit_amount | decimal | нет | Лимит | 300000 |
-| balance | decimal | да | Остаток или задолженность | 120000 |
-| currency | string | нет | Валюта | RUB |
-| status | string | нет | активен / закрыт / просрочен | активен |
-| dpd | int | да | Дней просрочки | 35 |
-| par_bucket | string | нет | current / 30+ / 60+ / 90+ | 30+ |
+|| account_id | string | да | Уникальный идентификатор счёта | AC-99887 ||
+|| client_id | string | да | Ссылка на clients | C-12345 ||
+|| product_code | string | да | Ссылка на products | CC-01 ||
+|| open_date | date | нет | Дата открытия | 2024-02-10 ||
+|| close_date | date | нет | Дата закрытия | 2024-11-01 ||
+|| limit_amount | decimal | нет | Лимит | 300000 ||
+|| balance | decimal | да | Остаток или задолженность | 120000 ||
+|| currency | string | нет | Валюта | RUB ||
+|| status | string | нет | активен / закрыт / просрочен | активен ||
+|| dpd | int | да | Дней просрочки | 35 ||
+|| par_bucket | string | нет | current / 30+ / 60+ / 90+ | 30+ ||
+|| score | decimal | нет | Скоринговый балл (PD-калибровка) | 720 ||
+|| default_flag | int | нет | Флаг дефолта (1=дефолт, 0=норма) | 0 ||
+|| lgd | decimal | нет | Loss Given Default, доля потерь при дефолте (0-1) | 0.45 ||
+|| ead | decimal | нет | Exposure at Default (если отличается от balance) | 150000 ||
 
 **Важно:** `par_bucket` — интервальный бакет (30+ означает 30-59 дней), а PAR
 считается кумулятивно по `dpd`. Если бакеты и `dpd` расходятся, контроль качества

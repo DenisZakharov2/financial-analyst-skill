@@ -78,6 +78,7 @@ metadata:
    Расширенные расчёты включаются флагами: `--forecast-model auto` (каскад прогноза: Linear / ETS / ARX / SARIMAX),
    `--segment` (RFM + Risk и кластеры), `--ab-test` (оценка пилота),
    `--drivers` (PVM, сдвиг PAR, лаговые связи макропоказателей),
+   `--credit-risk` (PD/LGD/EAD, Expected Loss, RWA по Basel IRB),
    `--cohort` (старт когорты и retention-кривые по возрасту в месяцах).
    Для больших выгрузок: `--chunksize N` (streaming CSV) или `--pg-chunksize N` (streaming PostgreSQL).
    *Критерий: `metrics.json` содержит разделы и допущения, код возврата 0.*

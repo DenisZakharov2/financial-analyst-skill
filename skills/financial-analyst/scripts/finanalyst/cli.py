@@ -36,6 +36,7 @@ from .core import (
     period_ym,
     validate_inputs,
 )
+from .credit_risk import CreditRiskConfig, calculate_credit_risk, credit_risk_summary_frame
 from .drivers import macro_lead_lag, par_shift_decomposition, pvm_decomposition
 from .experiments import run_ab_test
 from .forecast import forecast_advanced
@@ -126,6 +127,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--vintage", action="store_true",
                         help="Винтажный анализ: баланс и просрочка по месяцам открытия счёта "
                              "(соглашения — references/migration.md)")
+    parser.add_argument("--credit-risk", action="store_true",
+                        help="Кредитный риск: PD/LGD/EAD, Expected Loss, RWA (Basel IRB)")
     parser.add_argument("--drivers", action="store_true",
                         help="Факторный разбор: PVM и разложение сдвига PAR между срезами, "
                              "лаговые связи макропоказателей")
@@ -1704,6 +1707,69 @@ def _stage_vintage(p: _Pipeline) -> None:
     }
 
 
+def _stage_credit_risk(p: _Pipeline) -> None:
+    """Кредитный риск (--credit-risk): PD/LGD/EAD, Expected Loss, RWA (Basel IRB)."""
+    if not getattr(p.args, "credit_risk", False):
+        return
+
+    portfolio = p.tables.get("portfolio")
+    if portfolio is None or portfolio.empty:
+        p.warnings.append("Кредитный риск пропущен: нет таблицы portfolio.")
+        return
+
+    config = CreditRiskConfig()
+    result = calculate_credit_risk(portfolio, config)
+
+    if not result.get("available"):
+        p.warnings.append(f"Кредитный риск: {result.get('assumption', 'недоступно')}")
+        return
+
+    # Summary frame for report
+    frame = credit_risk_summary_frame(result)
+    p.sections.append((
+        "Кредитный риск: PD, LGD, EAD, Expected Loss, RWA",
+        frame,
+        result["assumption"],
+    ))
+
+    # Detailed breakdowns
+    if result.get("summary_by_product"):
+        prod_frame = pd.DataFrame(result["summary_by_product"])
+        p.sections.append((
+            "Кредитный риск: разбивка по продуктам",
+            prod_frame,
+            "EAD-weighted averages per product.",
+        ))
+
+    if result.get("summary_by_bucket"):
+        bucket_frame = pd.DataFrame(result["summary_by_bucket"])
+        p.sections.append((
+            "Кредитный риск: разбивка по PAR-бакетам",
+            bucket_frame,
+            "EAD-weighted averages per PAR bucket.",
+        ))
+
+    # Store in metrics payload
+    p.metrics_payload["sections"]["credit_risk"] = {
+        "portfolio": result["portfolio"],
+        "summary_by_product": result.get("summary_by_product"),
+        "summary_by_bucket": result.get("summary_by_bucket"),
+        "assumption": result["assumption"],
+    }
+
+    # Headline
+    port = result["portfolio"]
+    p.headline.append(headline_row(
+        "Ожидаемые потери (EL)", port["total_expected_loss"] / 1e6, "млн руб.", "credit_risk", digits=1
+    ))
+    p.headline.append(headline_row(
+        "RWA", port["total_rwa"] / 1e6, "млн руб.", "credit_risk", digits=1
+    ))
+    p.headline.append(headline_row(
+        "Капитал (8% RWA)", port["capital_requirement"] / 1e6, "млн руб.", "credit_risk", digits=1
+    ))
+
+
 def _stage_metrics(p: _Pipeline) -> None:
     """Плоские метрики: metrics.json и metrics.csv для сверки значений."""
     # metrics.csv — плоский список чисел для сверки: разделы, ключевые
@@ -1783,6 +1849,7 @@ def run(args: argparse.Namespace) -> int:
     _stage_comparison(p)
     _stage_migration(p)
     _stage_vintage(p)
+    _stage_credit_risk(p)
     _stage_metrics(p)
     _stage_reports(p)
     return 0
