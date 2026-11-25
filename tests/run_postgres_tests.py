@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Run postgres integration tests in a subprocess with clean environment."""
 
-import sys
 import os
 import subprocess
+import sys
 
 # Add the project root to path
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
