@@ -60,6 +60,7 @@ from .seasonality_tat import funnel_tat, seasonality_summary
 from .segmentation import segment_clients
 from .visuals import (
     build_dashboard,
+    build_full_dashboard,
     chart_anomalies,
     chart_correlation,
     chart_forecast,
@@ -1808,6 +1809,7 @@ def _stage_reports(p: _Pipeline) -> None:
     if "html" in p.formats:
         dashboard_path = p.out_dir / "dashboard.html"
         html_path = p.out_dir / "report.html"
+        full_dashboard_path = p.out_dir / "report.html"
         has_client_sections = any(
             k in p.metrics_payload["sections"] for k in ("portfolio", "funnel", "finance", "comparison")
         )
@@ -1815,7 +1817,11 @@ def _stage_reports(p: _Pipeline) -> None:
             dashboard_path.replace(html_path)
         else:
             write_html(report, html_path)
-        created["html"] = html_path
+        # Build comprehensive interactive dashboard
+        build_full_dashboard(p.metrics_payload, p.charts, full_dashboard_path, title=p.args.title)
+        created["html"] = full_dashboard_path
+        if dashboard_path != html_path and dashboard_path.exists():
+            created["dashboard"] = dashboard_path
 
     log(p.args, "")
     log(p.args, "Готово:")

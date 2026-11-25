@@ -15,6 +15,13 @@ import pandas as pd
 
 from .metrics import robust_z
 
+
+def records(frame: pd.DataFrame | None) -> list[dict]:
+    """Convert DataFrame to list of dicts for JSON serialization."""
+    if frame is None or frame.empty:
+        return []
+    return frame.to_dict("records")
+
 PALETTE = {
     "navy": "#1f2937",
     "slate": "#374151",
@@ -460,7 +467,7 @@ window.addEventListener("load", init);
 
 def build_dashboard(survey: pd.DataFrame, indicator: str, path: Path,
                     title: str = "Интерактивный дашборд") -> Path | None:
-    """Собрать офлайн-дашборд: фильтр по отрасли + окно наблюдения."""
+    """Собрать офлайн-дашборд: фильтр по отрасли + окно наблюдения (только для macro_survey)."""
     if survey is None or survey.empty:
         return None
     data = survey[survey["indicator"] == indicator].dropna(subset=["period_start", "value"])
@@ -534,3 +541,305 @@ def build_dashboard(survey: pd.DataFrame, indicator: str, path: Path,
             .replace("__GENERATED__", dt.datetime.now().strftime("%d.%m.%Y %H:%M")))
     path.write_text(html_out, encoding="utf-8")
     return path
+
+
+# --------------------------------------------------------------------------
+# Comprehensive Interactive Dashboard (all sections)
+# --------------------------------------------------------------------------
+
+FULL_DASHBOARD_TEMPLATE = """<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<script>__PLOTLY__</script>
+<style>
+  :root { --navy:#1f2937; --slate:#374151; --muted:#6b7280; --line:#e5e7eb;
+          --bg:#f8f9fa; --card:#ffffff; --accent:#3b82f6; --accent-hover:#2563eb; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:0; background:var(--bg); color:var(--navy);
+         font-family:"Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+  .header { background:var(--card); border-bottom:1px solid var(--line);
+            padding:16px 24px; position:sticky; top:0; z-index:100; }
+  .header-content { max-width:1400px; margin:0 auto; display:flex; flex-wrap:wrap; gap:16px; align-items:center; }
+  h1 { font-size:22px; margin:0; flex:1; }
+  .meta { color:var(--muted); font-size:12px; }
+  .filters { display:flex; flex-wrap:wrap; gap:12px; align-items:end; }
+  .field { display:flex; flex-direction:column; gap:4px; min-width:180px; }
+  .field label { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
+  select { font:inherit; padding:6px 10px; border:1px solid var(--line);
+           border-radius:6px; background:#fff; color:var(--navy); cursor:pointer; }
+  .tabs { max-width:1400px; margin:0 auto; padding:0 24px; display:flex; gap:2px; overflow-x:auto; }
+  .tab { padding:10px 16px; border:none; background:transparent; color:var(--muted);
+         font:inherit; cursor:pointer; border-bottom:2px solid transparent;
+         transition:all .15s; white-space:nowrap; }
+  .tab:hover { color:var(--navy); background:#f3f4f6; }
+  .tab.active { color:var(--accent); border-bottom-color:var(--accent); font-weight:600; }
+  .tab-panel { display:none; max-width:1400px; margin:0 auto; padding:20px 24px; }
+  .tab-panel.active { display:block; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(400px, 1fr)); gap:20px; }
+  .grid-1 { grid-template-columns:1fr; }
+  .grid-2 { grid-template-columns:repeat(auto-fit, minmax(350px, 1fr)); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px;
+          padding:16px; }
+  .card h2 { font-size:15px; margin:0 0 12px; color:var(--slate); display:flex; align-items:center; gap:8px; }
+  .card .chart { width:100%; min-height:350px; }
+  .card .small-chart { min-height:250px; }
+  .table-wrap { overflow-x:auto; }
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  th { text-align:left; background:#f3f4f6; color:var(--slate); font-weight:600;
+       padding:8px; border-bottom:1px solid var(--line); position:sticky; top:0; }
+  td { padding:7px 8px; border-bottom:1px solid var(--line); }
+  td.num { text-align:right; font-variant-numeric:tabular-nums; }
+  tr:hover td { background:#f9fafb; }
+  .badge { display:inline-block; padding:2px 8px; border-radius:999px; font-size:11px; font-weight:600; }
+  .badge-positive { background:#dcfce7; color:#166534; }
+  .badge-negative { background:#fee2e2; color:#991b1b; }
+  .badge-neutral { background:#eff6ff; color:#1e40af; }
+  .badge-warning { background:#fef3c7; color:#92400e; }
+  .kpi-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:12px; margin-bottom:20px; }
+  .kpi { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:14px; }
+  .kpi .label { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; margin-bottom:4px; }
+  .kpi .value { font-size:22px; font-weight:600; color:var(--navy); }
+  .kpi .unit { font-size:11px; color:var(--muted); }
+  .drill-toggle { cursor:pointer; user-select:none; }
+  .drill-toggle::before { content:"▸"; display:inline-block; width:14px; transition:transform .15s; }
+  .drill-toggle.open::before { transform:rotate(90deg); }
+  .drill-content { display:none; margin-top:12px; padding-top:12px; border-top:1px solid var(--line); }
+  .drill-content.open { display:block; }
+  .empty-state { text-align:center; color:var(--muted); padding:40px; font-size:14px; }
+  .footer { max-width:1400px; margin:24px auto 0; padding:16px 24px; color:var(--muted); font-size:11px; border-top:1px solid var(--line); text-align:center; }
+  @media (max-width:1024px) { .grid { grid-template-columns:1fr; } .header { padding:12px 16px; } }
+  @media (max-width:640px) { h1 { font-size:18px; } .field { min-width:100%; } .card { padding:12px; } }
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="header-content">
+    <h1>__TITLE__</h1>
+    <div class="meta">Период: <span id="period-range"></span> · сформировано __GENERATED__</div>
+    <div class="filters">
+      <div class="field">
+        <label for="filter-product">Продукт</label>
+        <select id="filter-product"><option value="">Все</option></select>
+      </div>
+      <div class="field">
+        <label for="filter-region">Регион</label>
+        <select id="filter-region"><option value="">Все</option></select>
+      </div>
+      <div class="field">
+        <label for="filter-segment">Сегмент</label>
+        <select id="filter-segment"><option value="">Все</option></select>
+      </div>
+      <div class="field">
+        <label for="filter-period">Период</label>
+        <select id="filter-period"><option value="">Все</option></select>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="tabs" id="tabs">
+  <button class="tab active" data-tab="overview">Обзор</button>
+  <button class="tab" data-tab="portfolio">Портфель</button>
+  <button class="tab" data-tab="funnel">Воронка и TAT</button>
+  <button class="tab" data-tab="finance">Финансы и юнит-экономика</button>
+  <button class="tab" data-tab="forecast">Прогноз</button>
+  <button class="tab" data-tab="credit-risk">Кредитный риск</button>
+  <button class="tab" data-tab="segmentation">Сегментация</button>
+  <button class="tab" data-tab="macro">Рыночная статистика</button>
+  <button class="tab" data-tab="quality">Контроль качества</button>
+</div>
+
+<div class="tab-panel active" id="panel-overview">
+  <div class="kpi-grid" id="kpi-overview"></div>
+  <div class="grid grid-2">
+    <div class="card"><h2>Топ-5 продуктов по остатку</h2><div class="chart" id="chart-portfolio-top"></div></div>
+    <div class="card"><h2>PAR 30/60/90</h2><div class="chart" id="chart-par"></div></div>
+    <div class="card"><h2>Воронка: конверсия</h2><div class="chart" id="chart-funnel-overview"></div></div>
+    <div class="card"><h2>Выручка и маржа</h2><div class="chart" id="chart-finance-overview"></div></div>
+  </div>
+</div>
+
+<div class="tab-panel" id="panel-portfolio">
+  <div class="card"><h2>Структура портфеля <span class="drill-toggle" data-target="drill-portfolio-structure">▸ Детализация по продуктам</span></h2>
+    <div class="chart" id="chart-portfolio-structure"></div>
+    <div class="drill-content" id="drill-portfolio-structure"><div class="table-wrap" id="table-portfolio-structure"></div></div>
+  </div>
+  <div class="card"><h2>PAR-бакеты <span class="drill-toggle" data-target="drill-par-buckets">▸ По продуктам</span></h2>
+    <div class="chart" id="chart-par-buckets"></div>
+    <div class="drill-content" id="drill-par-buckets"><div class="table-wrap" id="table-par-buckets"></div></div>
+  </div>
+  <div class="card"><h2>Концентрация Топ-10 клиентов <span class="drill-toggle" data-target="drill-top10">▸ Детали</span></h2>
+    <div class="chart" id="chart-top10"></div>
+    <div class="drill-content" id="drill-top10"><div class="table-wrap" id="table-top10"></div></div>
+  </div>
+  <div class="card"><h2>Баланс по статусам</h2><div class="chart" id="chart-status"></div></div>
+</div>
+
+<div class="tab-panel" id="panel-funnel">
+  <div class="card"><h2>Воронка: конверсия по этапам <span class="drill-toggle" data-target="drill-funnel">▸ По каналам</span></h2>
+    <div class="chart" id="chart-funnel"></div>
+    <div class="drill-content" id="drill-funnel"><div class="table-wrap" id="table-funnel-channels"></div></div>
+  </div>
+  <div class="card"><h2>TAT: время прохождения этапов <span class="drill-toggle" data-target="drill-tat">▸ p50/p75/p90/p95</span></h2>
+    <div class="chart" id="chart-tat"></div>
+    <div class="drill-content" id="drill-tat"><div class="table-wrap" id="table-tat"></div></div>
+  </div>
+  <div class="card"><h2>SLA: выполнение нормативов</h2><div class="chart" id="chart-sla"></div></div>
+  <div class="card"><h2>Зависший бэклог <span class="drill-toggle" data-target="drill-backlog">▸ Активные заявки</span></h2>
+    <div class="chart" id="chart-backlog"></div>
+    <div class="drill-content" id="drill-backlog"><div class="table-wrap" id="table-backlog"></div></div>
+  </div>
+  <div class="card"><h2>Кривая Каплана-Мейера</h2><div class="chart" id="chart-km"></div></div>
+</div>
+
+<div class="tab-panel" id="panel-finance">
+  <div class="kpi-grid" id="kpi-finance"></div>
+  <div class="card"><h2>Выручка по продуктам <span class="drill-toggle" data-target="drill-revenue">▸ Детализация</span></h2>
+    <div class="chart" id="chart-revenue"></div>
+    <div class="drill-content" id="drill-revenue"><div class="table-wrap" id="table-revenue"></div></div>
+  </div>
+  <div class="card"><h2>Расходы по статьям <span class="drill-toggle" data-target="drill-costs">▸ Детализация</span></h2>
+    <div class="chart" id="chart-costs"></div>
+    <div class="drill-content" id="drill-costs"><div class="table-wrap" id="table-costs"></div></div>
+  </div>
+  <div class="card"><h2>Юнит-экономика <span class="drill-toggle" data-target="drill-unit">▸ CAC, LTV, ARPU</span></h2>
+    <div class="chart" id="chart-unit"></div>
+    <div class="drill-content" id="drill-unit"><div class="table-wrap" id="table-unit"></div></div>
+  </div>
+  <div class="card"><h2>NIM и маржинальность</h2><div class="chart" id="chart-nim"></div></div>
+</div>
+
+<div class="tab-panel" id="panel-forecast">
+  <div class="card"><h2>Прогноз с каскадом моделей <span class="drill-toggle" data-target="drill-forecast">▸ Метрики бэктеста</span></h2>
+    <div class="chart" id="chart-forecast"></div>
+    <div class="drill-content" id="drill-forecast"><div class="table-wrap" id="table-forecast-metrics"></div></div>
+  </div>
+  <div class="card"><h2>Сезонность и тренд</h2><div class="chart" id="chart-seasonality"></div></div>
+  <div class="card"><h2>Аномалии ряда</h2><div class="chart" id="chart-anomalies"></div></div>
+</div>
+
+<div class="tab-panel" id="panel-credit-risk">
+  <div class="kpi-grid" id="kpi-credit-risk"></div>
+  <div class="grid grid-2">
+    <div class="card"><h2>PD распределение <span class="drill-toggle" data-target="drill-pd">▸ По продуктам</span></h2>
+      <div class="chart" id="chart-pd"></div>
+      <div class="drill-content" id="drill-pd"><div class="table-wrap" id="table-pd-products"></div></div>
+    </div>
+    <div class="card"><h2>Expected Loss по продуктам <span class="drill-toggle" data-target="drill-el-products">▸ Детали</span></h2>
+      <div class="chart" id="chart-el-products"></div>
+      <div class="drill-content" id="drill-el-products"><div class="table-wrap" id="table-el-products"></div></div>
+    </div>
+    <div class="card"><h2>RWA и капитал <span class="drill-toggle" data-target="drill-rwa">▸ По PAR-бакетам</span></h2>
+      <div class="chart" id="chart-rwa"></div>
+      <div class="drill-content" id="drill-rwa"><div class="table-wrap" id="table-rwa-buckets"></div></div>
+    </div>
+    <div class="card"><h2>LGD и EAD профили</h2><div class="chart" id="chart-lgd-ead"></div></div>
+  </div>
+</div>
+
+<div class="tab-panel" id="panel-segmentation">
+  <div class="card"><h2>Матрица RFM + Risk <span class="drill-toggle" data-target="drill-rfm">▸ Таблица</span></h2>
+    <div class="chart" id="chart-rfm"></div>
+    <div class="drill-content" id="drill-rfm"><div class="table-wrap" id="table-rfm"></div></div>
+  </div>
+  <div class="card"><h2>Кластеры клиентов <span class="drill-toggle" data-target="drill-clusters">▸ Профили</span></h2>
+    <div class="chart" id="chart-clusters"></div>
+    <div class="drill-content" id="drill-clusters"><div class="table-wrap" id="table-clusters"></div></div>
+  </div>
+</div>
+
+<div class="tab-panel" id="panel-macro">
+  <div class="card"><h2>Динамика показателей <span class="drill-toggle" data-target="drill-macro-dynamics">▸ Аномалии</span></h2>
+    <div class="chart" id="chart-macro-dynamics"></div>
+    <div class="drill-content" id="drill-macro-dynamics"><div class="chart" id="chart-macro-anomalies"></div></div>
+  </div>
+  <div class="card"><h2>Структура и доли</h2><div class="chart" id="chart-macro-structure"></div></div>
+  <div class="card"><h2>Лаговые связи (Грейнджер) <span class="drill-toggle" data-target="drill-granger">▸ Значимые пары</span></h2>
+    <div class="drill-content" id="drill-granger"><div class="table-wrap" id="table-granger"></div></div>
+  </div>
+  <div class="card"><h2>Корреляционная матрица</h2><div class="chart" id="chart-macro-corr"></div></div>
+</div>
+
+<div class="tab-panel" id="panel-quality">
+  <div class="card"><h2>Результаты проверок качества данных <span class="drill-toggle" data-target="drill-quality">▸ Детали</span></h2>
+    <div class="table-wrap" id="table-quality"></div>
+    <div class="drill-content" id="drill-quality"></div>
+  </div>
+  <div class="card"><h2>ПДн проверка</h2><div class="table-wrap" id="table-pii"></div></div>
+</div>
+
+<div class="footer">Financial Analyst Skill — интерактивный дашборд. Данные обновляются при каждом запуске.</div>
+</body>
+</html>"""
+
+def build_full_dashboard(metrics_payload: dict, charts: dict, out_path: Path,
+                         title: str = "Financial Analyst — Interactive Dashboard") -> Path | None:
+    """Собрать полный интерактивный дашборд со всеми разделами анализа.
+
+    Args:
+        metrics_payload: словарь из p.metrics_payload (sections, headline, assumptions, insights, quality)
+        charts: словарь путей к PNG графикам (p.charts)
+        out_path: путь для сохранения HTML
+        title: заголовок дашборда
+    """
+    if not metrics_payload.get("sections"):
+        return None
+
+    import base64
+    import datetime as dt
+    import html
+    from pathlib import Path
+
+    from plotly.offline import get_plotlyjs
+
+    sections = metrics_payload.get("sections", {})
+    headline = metrics_payload.get("headline", [])
+    insights = metrics_payload.get("insights", [])
+    quality = metrics_payload.get("quality")
+
+    # Подготовка данных для дашборда
+    dashboard_data = {
+        "headline": headline,
+        "insights": insights,
+        "sections": {},
+        "quality": records(quality) if quality is not None and (isinstance(quality, pd.DataFrame) and not quality.empty or isinstance(quality, list) and quality) else [],
+    }
+
+    # Обрабатываем каждый раздел
+    for section_name, section_data in sections.items():
+        if isinstance(section_data, dict) and "rows" in section_data:
+            df = pd.DataFrame(section_data["rows"])
+        elif isinstance(section_data, list):
+            df = pd.DataFrame(section_data)
+        else:
+            continue
+        if df.empty:
+            continue
+        dashboard_data["sections"][section_name] = df.to_dict("records")
+
+    # Кодируем PNG графики в base64
+    chart_data = {}
+    for name, chart_path in charts.items():
+        if chart_path and Path(chart_path).exists():
+            encoded = base64.b64encode(Path(chart_path).read_bytes()).decode("ascii")
+            chart_data[name] = f"data:image/png;base64,{encoded}"
+
+    payload = {
+        "data": dashboard_data,
+        "charts": chart_data,
+    }
+
+    safe_title = html.escape(title)
+    safe_data = json.dumps(payload, ensure_ascii=False).replace("<", "\\u003c").replace("</", "<\\/")
+
+    html_out = (FULL_DASHBOARD_TEMPLATE
+            .replace("__PLOTLY__", get_plotlyjs())
+            .replace("__DATA__", safe_data)
+            .replace("__TITLE__", safe_title)
+            .replace("__GENERATED__", dt.datetime.now().strftime("%d.%m.%Y %H:%M")))
+
+    out_path.write_text(html_out, encoding="utf-8")
+    return out_path
