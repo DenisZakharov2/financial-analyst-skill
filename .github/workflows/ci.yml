@@ -172,4 +172,4 @@ jobs:
           PGDATABASE: testdb
           PGUSER: testuser
           PGPASSWORD: testpass
-        run: python -m pytest -q tests/test_postgres.py --cov=finanalyst.adapters.postgres --cov-report=term-missing --forked
+        run: pytest -q tests/test_postgres.py --cov=finanalyst.adapters.postgres --cov-report=term-missing
