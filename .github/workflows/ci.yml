@@ -43,7 +43,7 @@ jobs:
         run: python skills/financial-analyst/scripts/check_skill.py
 
       - name: Tests
-        run: pytest -q --cov=finanalyst --cov-report=term-missing -k "not postgres"
+        run: pytest -q --cov=finanalyst --cov-report=term-missing -k "not postgres" --forked
 
       - name: Verify CLI entry point
         run: financial-analyst --help
@@ -172,4 +172,4 @@ jobs:
           PGDATABASE: testdb
           PGUSER: testuser
           PGPASSWORD: testpass
-        run: pytest -q tests/test_postgres.py --cov=finanalyst.adapters.postgres --cov-report=term-missing
+        run: pytest -q tests/test_postgres.py --cov=finanalyst.adapters.postgres --cov-report=term-missing --forked
