@@ -1,5 +1,43 @@
 # Changelog
 
+## 2.1.8 — 2026-11-25
+
+**Добавлено**
+
+- **Statsmodels/SARIMAX** (опциональная зависимость `statsmodels`):
+  - `finanalyst/forecast.py`: `_fit_predict_sarimax()` — SARIMAX с автоматическим подбором порядков (p,d,q)×(P,D,Q,m) через AIC
+  - Поддержка экзогенных переменных
+  - Фоллбэк на линейный тренд если statsmodels не установлен или ряд короткий (<8 точек)
+  - Интеграция в каскад `forecast_advanced`: доступен в `--forecast-model auto` и `--forecast-model sarimax`
+  - Зависимость: `statsmodels>=0.14,<1` в extra `statsmodels` в `pyproject.toml`
+
+- **Кредитный риск PD/LGD/EAD (Basel IRB)**:
+  - Новый модуль `finanalyst/credit_risk.py`
+  - PD: калибровка через логистическую функцию от `score`, `default_flag=1` или `dpd>=90` → PD=1.0
+  - LGD: колонка `lgd` или дефолт 45%
+  - EAD: `balance + CCF * max(0, limit - balance)` или колонка `ead`
+  - Expected Loss = Σ PD × LGD × EAD
+  - RWA: формула Basel II/III IRB (Vasicek), ρ=0.24, M=2.5
+  - Capital Requirement = 8% × RWA
+  - Разбивки по продуктам и PAR-бакетам
+  - CLI флаг `--credit-risk`, конфиг секция `credit_risk`
+  - 14 тестов в `tests/test_credit_risk.py`
+  - Документация: `data-dictionary.md` (колонки score, default_flag, lgd, ead), `playbook.md` (Сценарий 15)
+
+- **Интерактивный HTML-дашборд** (`finanalyst/visuals.py`):
+  - `build_full_dashboard()` — 9 вкладок: Обзор, Портфель, Воронка и TAT, Финансы и юнит-экономика, Прогноз, Кредитный риск, Сегментация, Рыночная статистика, Контроль качества
+  - Глобальные фильтры в закреплённом заголовке: Продукт, Регион, Сегмент, Период (client-side)
+  - Drill-down на карточках (▸) для раскрытия детальных таблиц
+  - KPI-сетки на вкладках Обзор, Финансы, Кредитный риск
+  - Встроенные PNG-графики (base64) + поддержка Plotly
+  - Адаптивный дизайн с липким заголовком, синхронизация легенды с фильтрами
+  - `report.html` теперь генерируется через полный дашборд
+
+**Исправлено**
+
+- Циклический импорт: функция `records()` перенесена из `cli.py` в `visuals.py`
+- Все тесты проходят (238), ruff/mypy чисто, CI зелёный (Python 3.10/3.12 + postgres интеграция)
+
 ## 2.1.7 — 2026-11-24
 
 **Добавлено**
