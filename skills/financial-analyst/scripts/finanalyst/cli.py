@@ -22,6 +22,13 @@ import pandas as pd
 
 from . import __version__
 from .adapters import cbr_survey, client_csv, postgres
+from .bi_integration import (
+    BIExportConfig,
+    BigQueryConfig,
+    ClickHouseConfig,
+    PostgreSQLConfig,
+    run_bi_export,
+)
 from .cohorts import cohort_starts, retention_curves
 from .comparison import compare_snapshots
 from .config import PipelineConfig, merge_configs
@@ -42,6 +49,9 @@ from .credit_risk import CreditRiskConfig, calculate_credit_risk, credit_risk_su
 from .drivers import macro_lead_lag, par_shift_decomposition, pvm_decomposition
 from .experiments import run_ab_test
 from .forecast import forecast_advanced
+from .memory_efficient import (
+    run_streaming_pipeline,
+)
 from .metrics import (
     MetricError,
     build_insights,
@@ -66,6 +76,7 @@ from .plugin_loader import (
     run_plugin_with_timeout,
 )
 from .plugins import PluginContext, clear_registry
+from .regulatory import RegulatoryConfig, generate_regulatory_reports, save_regulatory_reports
 from .reporting import ReportData, column_title, fmt_num, quality_frame, write_html, write_reports
 from .scenario import (
     Scenario,
@@ -168,6 +179,83 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Использовать встроенный набор сценариев (standard/all)")
     parser.add_argument("--scenario-param", action="append", default=None, metavar="PARAM=VALUE",
                         help="Переопределить параметр сценария (например, finance.forecast_rate_shock=1.05)")
+
+    # Регуляторная отчётность
+    reg_group = parser.add_argument_group("Регуляторная отчётность")
+    reg_group.add_argument("--regulatory", action="store_true",
+                        help="Сгенерировать регуляторные отчёты (КоФ 101, 102, НБКИ, Базель III Пилар 3)")
+    reg_group.add_argument("--reg-reports", nargs="*", default=None, metavar="REPORT",
+                        help="Список отчётов: cof_101, cof_102, nbki, basel_pillar3 (по умолчанию все)")
+    reg_group.add_argument("--org-name", default="ООО «Финансовая Компания»", help="Название организации для отчётов")
+    reg_group.add_argument("--org-bik", default="044525225", help="БИК организации")
+    reg_group.add_argument("--org-inn", default="7707083893", help="ИНН организации")
+    reg_group.add_argument("--org-okpo", default="12345678", help="ОКПО организации")
+    reg_group.add_argument("--reporting-date", type=lambda s: datetime.strptime(s, "%Y-%m-%d").date(), default=None,
+                        help="Дата отчётности (YYYY-MM-DD), по умолчанию сегодня")
+    reg_group.add_argument("--reg-formats", default="json,xlsx", help="Форматы регуляторных отчётов через запятую")
+
+    # BI-интеграция
+    bi_group = parser.add_argument_group("BI-интеграция")
+    bi_group.add_argument("--bi-export", action="store_true",
+                        help="Экспорт метрик в форматы для BI (Parquet, CSV, XLSX, JSONL)")
+    bi_group.add_argument("--bi-formats", default="parquet,csv", help="Форматы BI-экспорта через запятую")
+    bi_group.add_argument("--bi-output-dir", type=Path, default=Path("./bi_export"),
+                        help="Директория для BI-экспорта")
+    bi_group.add_argument("--bi-compression", default="snappy", choices=["snappy", "gzip", "zstd", "none"],
+                        help="Сжатие для Parquet/Feather")
+    bi_group.add_argument("--bi-partition-by", nargs="*", default=None, metavar="COL",
+                        help="Колонки для партиционирования (reporting_date, product_code и т.д.)")
+
+    # Memory-efficient режим
+    mem_group = parser.add_argument_group("Memory-efficient режим")
+    mem_group.add_argument("--streaming", action="store_true",
+                        help="Memory-efficient режим: инкрементальные метрики, партиционирование, параллельные чанки")
+    mem_group.add_argument("--mem-workers", type=int, default=None, metavar="N",
+                        help="Количество воркеров для параллельной обработки чанков (по умолчанию CPU count)")
+    mem_group.add_argument("--mem-processes", action="store_true",
+                        help="Использовать ProcessPool вместо ThreadPool (для CPU-bound задач)")
+    mem_group.add_argument("--partition-by-time", action="store_true",
+                        help="Партиционирование по времени (месяц/квартал/неделя)")
+    mem_group.add_argument("--partition-by-product", action="store_true",
+                        help="Партиционирование по коду продукта")
+    mem_group.add_argument("--time-freq", default="M", choices=["M", "Q", "W"],
+                        help="Частота временных партиций: M=месяц, Q=квартал, W=неделя")
+    mem_group.add_argument("--skip-heavy-metrics", action="store_true",
+                        help="Пропустить тяжёлые метрики (credit_risk, forecast, drivers) на больших данных")
+    mem_group.add_argument("--max-rows-full", type=int, default=1_000_000, metavar="N",
+                        help="Порог строк для полного расчёта метрик (выше — упрощённые формулы)")
+
+    # DWH подключения
+    dwh_group = parser.add_argument_group("DWH connections")
+    dwh_group.add_argument("--dwh", choices=["clickhouse", "postgresql", "bigquery"], default=None,
+                        help="Загрузить метрики в DWH")
+    dwh_group.add_argument("--dwh-if-exists", default="append", choices=["fail", "replace", "append"],
+                        help="Поведение при существовании таблицы")
+
+    # ClickHouse
+    ch_group = parser.add_argument_group("ClickHouse connection")
+    ch_group.add_argument("--ch-host", default=None, help="Хост ClickHouse")
+    ch_group.add_argument("--ch-port", type=int, default=None, help="Порт ClickHouse (HTTP: 8123, Native: 9000)")
+    ch_group.add_argument("--ch-database", default=None, help="База данных ClickHouse")
+    ch_group.add_argument("--ch-user", default=None, help="Пользователь ClickHouse")
+    ch_group.add_argument("--ch-password", default=None, help="Пароль ClickHouse")
+
+    # PostgreSQL (дополнительные к существующим)
+    pg_group = parser.add_argument_group("PostgreSQL connection (for DWH)")
+    pg_group.add_argument("--dwh-pg-host", default=None, help="Хост PostgreSQL для DWH")
+    pg_group.add_argument("--dwh-pg-port", type=int, default=None, help="Порт PostgreSQL")
+    pg_group.add_argument("--dwh-pg-database", default=None, help="База данных PostgreSQL")
+    pg_group.add_argument("--dwh-pg-user", default=None, help="Пользователь PostgreSQL")
+    pg_group.add_argument("--dwh-pg-password", default=None, help="Пароль PostgreSQL")
+    pg_group.add_argument("--dwh-pg-schema", default="finanalyst", help="Схема PostgreSQL")
+
+    # BigQuery
+    bq_group = parser.add_argument_group("BigQuery connection")
+    bq_group.add_argument("--bq-project", default=None, help="Google Cloud Project ID")
+    bq_group.add_argument("--bq-dataset", default=None, help="BigQuery Dataset ID")
+    bq_group.add_argument("--bq-location", default="US", help="BigQuery Location")
+    bq_group.add_argument("--bq-credentials", default=None, help="Путь к Service Account JSON")
+
     parser.add_argument("--compare-dirs", nargs=2, metavar=("BASE_DIR", "TARGET_DIR"),
                         help="Сравнить две выгрузки: базовая и целевая директории")
     parser.add_argument("--labels", nargs=2, metavar=("BASE_LABEL", "TARGET_LABEL"), default=["base", "target"],
@@ -2150,6 +2238,202 @@ def _stage_reports(p: _Pipeline) -> None:
         log(p.args, f"Предупреждений: {len(p.warnings)} (см. metrics.json → warnings)")
 
 
+def _stage_regulatory(p: _Pipeline) -> None:
+    """Регуляторные отчёты: КоФ 101, 102, НБКИ, Базель III Пилар 3."""
+    if not getattr(p.args, "regulatory", False):
+        return
+
+    log(p.args, "Регуляторная отчётность: генерация...")
+
+    # Формируем конфиг
+    reporting_date = getattr(p.args, "reporting_date", None)
+    if reporting_date is None:
+        from datetime import date
+        reporting_date = date.today()
+
+    reg_config = RegulatoryConfig(
+        org_name=getattr(p.args, "org_name", "ООО «Финансовая Компания»"),
+        org_bik=getattr(p.args, "org_bik", "044525225"),
+        org_inn=getattr(p.args, "org_inn", "7707083893"),
+        org_okpo=getattr(p.args, "org_okpo", "12345678"),
+        reporting_date=reporting_date,
+    )
+
+    # Определяем список отчётов
+    reg_reports = getattr(p.args, "reg_reports", None)
+    if reg_reports is None:
+        reg_reports = ["cof_101", "cof_102", "nbki", "basel_pillar3"]
+
+    # Генерируем отчёты
+    reports = generate_regulatory_reports(
+        tables=p.tables,
+        config=reg_config,
+        include=reg_reports,
+    )
+
+    # Сохраняем
+    reg_formats = getattr(p.args, "reg_formats", "json,xlsx").split(",")
+    reg_out_dir = p.out_dir / "regulatory"
+    saved = save_regulatory_reports(reports, reg_out_dir, formats=reg_formats)
+
+    # Добавляем в metrics_payload
+    if "regulatory" not in p.metrics_payload.get("sections", {}):
+        p.metrics_payload["sections"]["regulatory"] = {}
+    p.metrics_payload["sections"]["regulatory"]["generated"] = list(saved.keys())
+    p.metrics_payload["sections"]["regulatory"]["output_dir"] = str(reg_out_dir)
+
+    log(p.args, f"Регуляторные отчёты сохранены в {reg_out_dir}")
+    for name, path in saved.items():
+        log(p.args, f"  {name}: {path.name}")
+
+
+def _stage_memory_efficient(p: _Pipeline) -> None:
+    """Memory-efficient режим: streaming-пайплайн с инкрементальными метриками."""
+    if not getattr(p.args, "streaming", False):
+        return
+
+    log(p.args, "Memory-efficient режим: запуск streaming-пайплайна...")
+
+    # Определяем chunksize
+    chunksize = getattr(p.args, "chunksize", None)
+    if chunksize is None:
+        chunksize = 50_000
+
+    # Запускаем streaming-пайплайн
+    result = run_streaming_pipeline(
+        p.data_dir,
+        chunksize=chunksize,
+        n_workers=getattr(p.args, "mem_workers", None),
+        use_processes=getattr(p.args, "mem_processes", False),
+        partition_by_time=getattr(p.args, "partition_by_time", True),
+        partition_by_product=getattr(p.args, "partition_by_product", False),
+        enable_credit_risk=getattr(p.args, "credit_risk", False) and not getattr(p.args, "skip_heavy_metrics", False),
+        enable_forecast=getattr(p.args, "forecast_h", 0) > 0 and not getattr(p.args, "skip_heavy_metrics", False),
+        enable_drivers=getattr(p.args, "drivers", False) and not getattr(p.args, "skip_heavy_metrics", False),
+        enable_scenario=getattr(p.args, "scenario_list", None) is not None and not getattr(p.args, "skip_heavy_metrics", False),
+    )
+
+    # Добавляем результаты в pipeline
+    p.notes.extend(result.get("notes", []))
+    p.warnings.extend(result.get("warnings", []))
+
+    # Метрики из streaming-пайплайна заменяют/дополняют обычные
+    streaming_metrics = result.get("metrics", {})
+
+    # Добавляем в metrics_payload
+    if "streaming" not in p.metrics_payload.get("sections", {}):
+        p.metrics_payload["sections"]["streaming"] = {}
+    p.metrics_payload["sections"]["streaming"]["enabled"] = True
+    p.metrics_payload["sections"]["streaming"]["stats"] = result.get("stats", {})
+    p.metrics_payload["sections"]["streaming"]["base_aggregations"] = result.get("base_aggregations", {})
+
+    # Если есть streaming метрики, используем их для разделов, которых нет в обычном пайплайне
+    for section_name, section_data in streaming_metrics.items():
+        if section_name not in p.metrics_payload.get("sections", {}):
+            p.metrics_payload["sections"][section_name] = section_data
+
+    log(p.args, f"Memory-efficient режим: обработано {result['stats']['total_rows']:,} строк в {result['stats'].get('partitions_processed', 0)} партициях")
+    for note in result.get("notes", []):
+        log(p.args, f"  {note}")
+    for warn in result.get("warnings", []):
+        p.warnings.append(warn)
+        log(p.args, f"  ВНИМАНИЕ: {warn}")
+
+
+def _stage_bi_export(p: _Pipeline) -> None:
+    """Экспорт метрик в форматы для BI-систем и загрузка в DWH."""
+    # Файловый экспорт
+    if not getattr(p.args, "bi_export", False):
+        bi_export = False
+    else:
+        bi_export = True
+
+    # DWH загрузка
+    dwh_target = getattr(p.args, "dwh", None)
+
+    if not bi_export and not dwh_target:
+        return
+
+    log(p.args, "BI-интеграция: экспорт метрик...")
+
+    # Подготавливаем конфиг BI экспорта
+    bi_config = BIExportConfig(
+        output_dir=getattr(p.args, "bi_output_dir", Path("./bi_export")),
+        file_formats=getattr(p.args, "bi_formats", "parquet,csv").split(","),
+        compression=getattr(p.args, "bi_compression", "snappy"),
+        partition_cols=getattr(p.args, "bi_partition_by", None),
+        partition_date=getattr(p.args, "reporting_date", None),
+        clean_output_dir=True,
+        file_prefix="finanalyst",
+    )
+
+    # Подготавливаем DWH конфиг если нужно
+    dwh_config = None
+    if dwh_target:
+        if dwh_target == "clickhouse":
+            ch_config = ClickHouseConfig(
+                host=getattr(p.args, "ch_host", "localhost"),
+                port=getattr(p.args, "ch_port", 8123),
+                database=getattr(p.args, "ch_database", "default"),
+                user=getattr(p.args, "ch_user", "default"),
+                password=getattr(p.args, "ch_password", ""),
+            )
+            dwh_config = {
+                "connector": "clickhouse",
+                "config": ch_config,
+                "if_exists": getattr(p.args, "dwh_if_exists", "append"),
+            }
+        elif dwh_target == "postgresql":
+            pg_config = PostgreSQLConfig(
+                host=getattr(p.args, "dwh_pg_host", "localhost"),
+                port=getattr(p.args, "dwh_pg_port", 5432),
+                database=getattr(p.args, "dwh_pg_database", "finanalyst"),
+                user=getattr(p.args, "dwh_pg_user", "analyst"),
+                password=getattr(p.args, "dwh_pg_password", ""),
+                schema=getattr(p.args, "dwh_pg_schema", "finanalyst"),
+            )
+            dwh_config = {
+                "connector": "postgresql",
+                "config": pg_config,
+                "if_exists": getattr(p.args, "dwh_if_exists", "append"),
+            }
+        elif dwh_target == "bigquery":
+            bq_project = getattr(p.args, "bq_project", None)
+            bq_dataset = getattr(p.args, "bq_dataset", None)
+            if not bq_project or not bq_dataset:
+                raise ValueError("Для BigQuery обязательны --bq-project и --bq-dataset")
+            bq_config = BigQueryConfig(
+                project_id=bq_project,
+                dataset_id=bq_dataset,
+                location=getattr(p.args, "bq_location", "US"),
+                credentials_path=getattr(p.args, "bq_credentials", None),
+            )
+            dwh_config = {
+                "connector": "bigquery",
+                "config": bq_config,
+                "if_exists": getattr(p.args, "dwh_if_exists", "append"),
+            }
+
+    # Запускаем экспорт
+    result = run_bi_export(
+        metrics_payload=p.metrics_payload,
+        output_dir=bi_config.output_dir,
+        formats=bi_config.file_formats if bi_export else None,
+        dwh=dwh_config,
+    )
+
+    # Логируем результаты
+    if bi_export:
+        log(p.args, f"BI-экспорт в {bi_config.output_dir}:")
+        for name, path in result.get("files", {}).items():
+            log(p.args, f"  {name}: {path}")
+
+    if dwh_config:
+        log(p.args, f"DWH загрузка ({dwh_target}):")
+        for table, rows in result.get("dwh", {}).items():
+            log(p.args, f"  {table}: {rows} строк")
+
+
 def run(args: argparse.Namespace) -> int:
     """Конвейер отчёта: подготовка → загрузка → контроль качества → разделы → отчёты."""
     data_dir, out_dir, charts_dir, formats, chunksize, config = _prepare_dirs(args)
@@ -2175,7 +2459,10 @@ def run(args: argparse.Namespace) -> int:
     _stage_migration(p)
     _stage_vintage(p)
     _stage_credit_risk(p)
+    _stage_memory_efficient(p)
     _stage_metrics(p)
+    _stage_regulatory(p)
+    _stage_bi_export(p)
     _stage_reports(p)
     return 0
 
