@@ -40,6 +40,9 @@ market statistics, anomaly detection and trend forecasting with reproducible rep
 | `--segment` | Сегментация клиентов: RFM + Risk и кластеризация (`--no-cluster` — без кластеризации) |
 | `--drivers` | PVM и разложение сдвига PAR между срезами, лаговые связи макропоказателей |
 | `--credit-risk` | Кредитный риск: PD/LGD/EAD, Expected Loss, RWA (Basel IRB) |
+| `--scenario-list standard|all` | Сценарный анализ: what-if моделирование с пресетами (base, stress, optimistic) |
+| `--scenario` | Путь к YAML файлу с пользовательскими сценариями |
+| `--scenario-param PARAM=VALUE` | Переопределение параметра сценария (например, `finance.forecast_rate_shock=1.05`) |
 | `--config` | Путь к YAML-конфигу с декларативной настройкой пайплайна (перезаписывается CLI-флагами) |
 | `--source {files,postgres}` | Источник данных: файлы (CSV/Excel) или PostgreSQL (требует `--pg-*` флаги) |
 | `--pg-host`, `--pg-port`, `--pg-database`, `--pg-user`, `--pg-password`, `--pg-schema`, `--pg-chunksize` | Параметры подключения к PostgreSQL (также через ENV: PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD, PGSCHEMA, PGCHUNKSIZE) |
@@ -140,6 +143,127 @@ financial-analyst --source postgres --chunksize 5000 --pg-chunksize 5000 --out .
 ```
 
 > **Важно:** `macro_survey` (опросы ЦБ РФ) в БД не хранится — для макро-раздела положите `macro_survey.csv` в `data-dir` или используйте `--adapter client`.
+
+## Плагинная система метрик (--plugins-dir)
+
+Аналитики могут добавлять свои метрики без изменения ядра скилла.
+
+### Быстрый старт
+
+1. Создайте Python-файл с декоратором `@register_plugin`:
+
+```python
+# my_metrics.py
+from finanalyst.plugins import PluginContext, register_plugin
+import pandas as pd
+
+
+@register_plugin(
+    name="my_custom_metrics",
+    version="1.0.0",
+    api_version="1.0",
+)
+def my_metric(tables: dict[str, pd.DataFrame], ctx: PluginContext) -> pd.DataFrame:
+    portfolio = tables["portfolio"]
+    total = portfolio["balance"].sum()
+    return pd.DataFrame({"metric": ["total_balance"], "value": [total]})
+```
+
+2. Запустите с флагом `--plugins-dir`:
+
+```bash
+financial-analyst \
+  --data-dir ./data \
+  --out ./reports \
+  --plugins-dir ./my_plugins
+```
+
+Можно указать несколько директорий (последняя переопределяет при конфликте имён):
+
+```bash
+financial-analyst --plugins-dir ./plugins --plugins-dir ~/.finanalyst/plugins ...
+```
+
+### В отчёте
+
+- В HTML/DOCX/PDF появится раздел **"Плагины: My Metric"**
+- В `metrics.json` — секция `sections.plugins` с результатами
+
+### Конфигурация в YAML
+
+```yaml
+plugins:
+  enabled: true
+  directories:
+    - ./plugins
+    - ~/.finanalyst/plugins
+  timeout_sec: 30
+  params:
+    my_param: "value"
+```
+
+### Примеры плагинов
+
+В репозитории: `examples/plugins/`
+- `concentration_hhi.py` — HHI по типам продуктов, PAR-бакетам, клиентам
+- `roll_rate.py` — Roll-rate матрица (требует `--compare-dirs`)
+- `product_profitability.py` — NIM, Cost of Risk, ROA по продуктам
+
+Подробная спецификация API — [`references/plugins.md`](references/plugins.md).
+
+## Сценарный анализ (--scenario-list)
+
+What-if моделирование: запуск пайплайна с разными наборами параметров для оценки влияния изменений ставок, конверсии, качества заёмщиков и других факторов.
+
+### Быстрый старт
+
+```bash
+financial-analyst \
+  --data-dir ./data \
+  --out ./reports \
+  --scenario-list standard
+```
+
+Встроенные пресеты (`--scenario-list standard`):
+- `base` — базовый сценарий (текущие параметры)
+- `stress_rate_up` — рост ставки +3%, ухудшение PD
+- `stress_rate_down` — снижение ставки -3%, улучшение PD
+- `stress_conversion_drop` — падение конверсии -20%, рост PAR
+- `optimistic` — ставки вниз, качество вверх, конверсия выше
+- `regulatory_stress` — половые LGD, повышенные RWA
+
+### Пользовательские сценарии
+
+Создайте YAML файл:
+
+```yaml
+# my_scenarios.yaml
+scenarios:
+  - name: "custom_stress"
+    description: "Собственный стресс-тест"
+    params:
+      finance.forecast_rate_shock: 1.05
+      credit_risk.pd_calibration.a: 1.3
+      funnel.conversion_multiplier: 0.7
+```
+
+Запуск:
+
+```bash
+financial-analyst --data-dir ./data --out ./reports --scenario my_scenarios.yaml
+```
+
+### Переопределение параметров
+
+```bash
+financial-analyst --scenario-list standard --scenario-param finance.forecast_rate_shock=1.02
+```
+
+### В отчёте
+
+- Раздел **"Сценарии: сравнение"** — таблица ключевых метрик по всем сценариям
+- Сводка отклонений от базового сценария (абсолютные и процентные)
+- В `metrics.json` секция `scenarios` с полными результатами
 
 ## Установка как скилла Hermes
 

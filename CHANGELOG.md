@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.1.9 — 2026-11-26
+
+**Добавлено**
+
+- **Сценарный анализ (what-if / sensitivity analysis):**
+  - Новый модуль `finanalyst/scenario.py` — движок сценарийного моделирования
+  - `ScenarioEngine` — запуск пайплайна с разными наборами параметров
+  - Встроенные пресеты сценариев: `base`, `stress_rate_up`, `stress_rate_down`, `stress_conversion_drop`, `optimistic`, `regulatory_stress`
+  - CLI флаги: `--scenario-list standard|all`, `--scenario PATH` (YAML файл), `--scenario-param PARAM=VALUE`
+  - YAML конфиг секция `scenario:` с поддержкой `enabled`, `preset`, `config_file`, `params`
+  - Автоматическое сравнение сценариев: таблица метрик + сводка отклонений от базового
+  - Результаты в отчёте: раздел "Сценарии: сравнение", в `metrics.json` секция `scenarios`
+  - Sensitivity analysis: `engine.sensitivity_analysis(param_name, values)`
+  - 15 тестов в `tests/test_scenario.py` (unit + integration)
+
+**Исправлено**
+
+- Обновлена версия пакета до 2.1.9
+- Обновлена документация (SKILL.md, README.md, CHANGELOG.md)
+- mypy/ruff clean для новых модулей
+
 ## 2.1.8 — 2026-11-25
 
 **Добавлено**

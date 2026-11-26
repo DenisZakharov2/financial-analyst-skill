@@ -62,6 +62,12 @@ class PipelineConfig:
     # Сравнение
     comparison: dict[str, Any] = field(default_factory=dict)
 
+    # Плагины
+    plugins: dict[str, Any] = field(default_factory=dict)
+
+    # Сценарный анализ
+    scenario: dict[str, Any] = field(default_factory=dict)
+
     # Метаданные отчёта
     title: str = "Финансовый аналитический отчёт"
 
@@ -83,7 +89,7 @@ class PipelineConfig:
             "forecast_horizon", "forecast_band", "forecast_model",
             "strict", "pii_mode", "quality_thresholds", "output_formats",
             "chunksize", "ab_test", "segmentation", "cohort",
-            "migration", "vintage", "credit_risk", "drivers", "comparison", "title",
+            "migration", "vintage", "credit_risk", "drivers", "comparison", "plugins", "scenario", "title",
         }
         filtered = {k: v for k, v in data.items() if k in known_fields}
         return cls(**filtered)
@@ -110,6 +116,8 @@ class PipelineConfig:
             "credit_risk": self.credit_risk,
             "drivers": self.drivers,
             "comparison": self.comparison,
+            "plugins": self.plugins,
+            "scenario": self.scenario,
             "title": self.title,
         }
 
@@ -234,5 +242,46 @@ def merge_configs(
         if "unit_economics" not in result.__dict__:
             result.__dict__["unit_economics"] = {}
         result.__dict__["unit_economics"]["lifetime_months"] = cli_args["lifetime_months"]
+
+    # Плагины: директории для загрузки (multiple)
+    if cli_args.get("plugins_dir"):
+        if not result.plugins:
+            result.plugins = {}
+        # plugins_dir приходит как список Path объектов
+        dirs = cli_args["plugins_dir"]
+        if not isinstance(dirs, list):
+            dirs = [dirs]
+        result.plugins["directories"] = [str(d) for d in dirs]
+
+    # Сценарный анализ
+    if cli_args.get("scenario"):
+        if not result.scenario:
+            result.scenario = {}
+        result.scenario["enabled"] = True
+        result.scenario["config_file"] = cli_args["scenario"]
+
+    if cli_args.get("scenario_list"):
+        if not result.scenario:
+            result.scenario = {}
+        result.scenario["enabled"] = True
+        result.scenario["preset"] = cli_args["scenario_list"]
+
+    if cli_args.get("scenario_param"):
+        if not result.scenario:
+            result.scenario = {}
+        result.scenario["enabled"] = True
+        if "params" not in result.scenario:
+            result.scenario["params"] = {}
+        # scenario_param приходит как "param=value" или список
+        params = cli_args["scenario_param"]
+        if not isinstance(params, list):
+            params = [params]
+        for p in params:
+            if "=" in p:
+                key, val = p.split("=", 1)
+                try:
+                    result.scenario["params"][key] = float(val)
+                except ValueError:
+                    result.scenario["params"][key] = val
 
     return result

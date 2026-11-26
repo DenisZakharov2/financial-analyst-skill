@@ -1,7 +1,7 @@
 ---
 name: financial-analyst
-description: "Финансовый аналитик для банков, финтеха: портфель и PAR/NPL, P&L и bridge-сравнение выгрузок, воронка и TAT с SLA, юнит-экономика (CAC, ARPU, LTV), прогноз, A/B-пилоты, сегментация RFM, макро-опросы ЦБ РФ, защита ПДн, отчёты DOCX/PDF/XLSX/PPTX/RTF/HTML. YAML-конфиг, PostgreSQL-источник, streaming."
-version: 2.1.8
+description: "Финансовый аналитик для банков/финтеха: портфель и PAR/NPL, P&L bridge, воронка/TAT, юнит-экономика (CAC/ARPU/LTV), прогноз (Linear/ETS/ARX/SARIMAX), A/B-пилоты, RFM, макро ЦБ РФ, защита ПДн, кредитный риск (PD/LGD/EAD, Basel IRB), HTML-дашборд, плагины, сценарии. YAML-конфиг, PostgreSQL, streaming."
+version: 2.1.9
 author: Denis Zakharov (@DenisZakharov2), Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -79,7 +79,9 @@ metadata:
    `--segment` (RFM + Risk и кластеры), `--ab-test` (оценка пилота),
    `--drivers` (PVM, сдвиг PAR, лаговые связи макропоказателей),
    `--credit-risk` (PD/LGD/EAD, Expected Loss, RWA по Basel IRB),
-   `--cohort` (старт когорты и retention-кривые по возрасту в месяцах).
+   `--cohort` (старт когорты и retention-кривые по возрасту в месяцах),
+   `--plugins-dir` (пользовательские плагины метрик из внешних модулей),
+   `--scenario-list standard` (сценарийный анализ: базовый, стресс, оптимистичный).
    Для больших выгрузок: `--chunksize N` (streaming CSV) или `--pg-chunksize N` (streaming PostgreSQL).
    *Критерий: `metrics.json` содержит разделы и допущения, код возврата 0.*
 6. **Сверить числа.** Сравните headline-показатели с `metrics.csv`
@@ -191,6 +193,9 @@ python scripts/check_skill.py
 | `references/examples.md` | Примеры запросов |
 | `scripts/finanalyst/config.py` | YAML-конфиг пайплайна (`PipelineConfig`, `merge_configs`) |
 | `scripts/finanalyst/adapters/postgres.py` | PostgreSQL-адаптер (SQLAlchemy, streaming) |
+| `scripts/finanalyst/plugins.py` | Плагинная система: реестр, декоратор, контекст |
+| `scripts/finanalyst/plugin_loader.py` | Загрузчик плагинов: обнаружение, валидация, таймауты |
+| `scripts/finanalyst/scenario.py` | Сценарный анализ: what-if моделирование, sensitivity |
 | `scripts/analyze.py` | CLI: расчёт и отчёты |
 | `scripts/check_skill.py` | Проверка самого скилла |
 | `templates/brief.md` | Бриф перед анализом |

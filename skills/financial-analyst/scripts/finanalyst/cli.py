@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import secrets
 import sys
+import threading
 import traceback
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -55,7 +57,24 @@ from .metrics import (
 )
 from .migration import migration_matrix, vintage_analysis
 from .pii import sanitize_tables
+from .plugin_loader import (
+    PluginTimeoutError,
+    check_required_columns,
+    check_required_tables,
+    discover_plugins,
+    load_plugin,
+    run_plugin_with_timeout,
+)
+from .plugins import PluginContext, clear_registry
 from .reporting import ReportData, column_title, fmt_num, quality_frame, write_html, write_reports
+from .scenario import (
+    Scenario,
+    ScenarioEngine,
+    create_standard_scenarios,
+    extract_key_metrics_from_payload,
+    scenario_results_summary,
+    scenario_results_to_dataframe,
+)
 from .seasonality_tat import funnel_tat, seasonality_summary
 from .segmentation import segment_clients
 from .visuals import (
@@ -141,6 +160,14 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Режим обработки ПДн: strict=остановить при обнаружении, redact=удалить ПДн и псевдонимизировать ключи, off=отключить проверку")
     parser.add_argument("--chunksize", type=int, default=None, metavar="N",
                         help="Размер чанка для стримингового чтения CSV (None = полная загрузка). Включает streaming-режим для больших выгрузок.")
+    parser.add_argument("--plugins-dir", type=Path, action="append", default=None, metavar="PATH",
+                        help="Директория с пользовательскими плагинами метрик (можно указать несколько раз).")
+    parser.add_argument("--scenario", type=Path, default=None, metavar="PATH",
+                        help="YAML файл со сценариями для what-if анализа")
+    parser.add_argument("--scenario-list", choices=["standard", "all"], default=None,
+                        help="Использовать встроенный набор сценариев (standard/all)")
+    parser.add_argument("--scenario-param", action="append", default=None, metavar="PARAM=VALUE",
+                        help="Переопределить параметр сценария (например, finance.forecast_rate_shock=1.05)")
     parser.add_argument("--compare-dirs", nargs=2, metavar=("BASE_DIR", "TARGET_DIR"),
                         help="Сравнить две выгрузки: базовая и целевая директории")
     parser.add_argument("--labels", nargs=2, metavar=("BASE_LABEL", "TARGET_LABEL"), default=["base", "target"],
@@ -1771,6 +1798,296 @@ def _stage_credit_risk(p: _Pipeline) -> None:
     ))
 
 
+def _stage_plugins(p: _Pipeline) -> None:
+    """Загрузка и выполнение пользовательских плагинов метрик.
+
+    Выполняется после загрузки данных и контроля качества, но до расчёта основных метрик.
+    Плагины могут добавлять свои разделы в отчёт и метрики в payload.
+    """
+    plugins_config = p.config.plugins
+    if not plugins_config:
+        return
+
+    enabled = plugins_config.get("enabled", True)
+    if not enabled:
+        return
+
+    directories = plugins_config.get("directories", [])
+    if not directories:
+        return
+
+    # Очищаем реестр перед загрузкой (на случай повторных запусков в тестах)
+    clear_registry()
+
+    # Обнаруживаем файлы плагинов
+    plugin_dirs = [Path(d) for d in directories]
+    plugin_files = discover_plugins(plugin_dirs)
+
+    if not plugin_files:
+        p.notes.append(f"Плагины: файлы не найдены в директориях {[str(d) for d in plugin_dirs]}")
+        return
+
+    p.notes.append(f"Плагины: обнаружено файлов: {len(plugin_files)}")
+
+    # Таймаут выполнения плагина
+    timeout_sec = plugins_config.get("timeout_sec", 30)
+
+    # Создаём контекст для плагинов
+    plugin_logger = logging.getLogger("finanalyst.plugins")
+    cancel_token = threading.Event()
+    ctx = PluginContext(
+        config=p.config,
+        params=plugins_config.get("params", {}),
+        logger=plugin_logger,
+        cancel_token=cancel_token,
+    )
+
+    # Загружаем и выполняем каждый плагин
+    for plugin_file in plugin_files:
+        meta = load_plugin(plugin_file)
+        if meta is None:
+            p.warnings.append(f"Плагин {plugin_file.name}: не загружен (см. логи)")
+            continue
+
+        plugin_name = meta["name"]
+        p.notes.append(f"Плагин: загружен {plugin_name} v{meta['version']} (API {meta['api_version']})")
+
+        for metric in meta["metrics"]:
+            metric_name = metric["name"]
+            compute_fn = metric["compute"]
+
+            # Проверка обязательных таблиц
+            missing_tables = check_required_tables(p.tables, metric["required_tables"])
+            if missing_tables:
+                p.warnings.append(
+                    f"Плагин {plugin_name}, метрика {metric_name}: отсутствуют таблицы {missing_tables}"
+                )
+                continue
+
+            # Проверка обязательных колонок
+            missing_cols = check_required_columns(p.tables, metric["required_columns"])
+            if missing_cols:
+                p.warnings.append(
+                    f"Плагин {plugin_name}, метрика {metric_name}: {', '.join(missing_cols)}"
+                )
+                continue
+
+            # Выполняем compute с таймаутом
+            try:
+                result = run_plugin_with_timeout(compute_fn, p.tables, ctx, timeout_sec)
+
+                # Нормализуем результат в DataFrame
+                if isinstance(result, dict):
+                    # Если вернули dict, пробуем сделать DataFrame
+                    result_df = pd.DataFrame(result)
+                elif isinstance(result, pd.DataFrame):
+                    result_df = result
+                else:
+                    p.warnings.append(
+                        f"Плагин {plugin_name}, метрика {metric_name}: неожиданный тип результата {type(result)}"
+                    )
+                    continue
+
+                # Добавляем в разделы отчёта
+                section_name = f"Плагины: {metric['display_name']}"
+                assumption = metric.get("description", "")
+                p.sections.append((section_name, result_df, assumption))
+
+                # Сохраняем в metrics_payload
+                if "plugins" not in p.metrics_payload["sections"]:
+                    p.metrics_payload["sections"]["plugins"] = {}
+                p.metrics_payload["sections"]["plugins"][metric_name] = {
+                    "display_name": metric["display_name"],
+                    "description": metric["description"],
+                    "rows": records(result_df),
+                    "output_schema": metric["output_schema"],
+                }
+
+                p.notes.append(f"Плагин {plugin_name}.{metric_name}: выполнен успешно, строк: {len(result_df)}")
+
+            except PluginTimeoutError:
+                p.warnings.append(
+                    f"Плагин {plugin_name}, метрика {metric_name}: превышен таймаут {timeout_sec}с"
+                )
+            except Exception as e:
+                p.warnings.append(
+                    f"Плагин {plugin_name}, метрика {metric_name}: ошибка выполнения: {e}"
+                )
+                plugin_logger.exception("Plugin %s metric %s failed", plugin_name, metric_name)
+
+
+def _stage_scenario(p: _Pipeline) -> None:
+    """Сценарный анализ: what-if моделирование ключевых параметров.
+
+    Запускает пайплайн несколько раз с разными параметрами и собирает результаты
+    в таблицу сравнения сценариев.
+    """
+    scenario_config = p.config.scenario
+    if not scenario_config:
+        return
+
+    enabled = scenario_config.get("enabled", False)
+    if not enabled:
+        return
+
+    # Базовый конфиг для ScenarioEngine — используем текущий конфиг пайплайна
+    base_config = p.config.to_dict()
+
+    # Функция запуска пайплайна для ScenarioEngine
+    def run_pipeline_fn(config_dict: dict) -> dict:
+        # Создаём временный PipelineConfig
+        from .config import PipelineConfig
+        temp_config = PipelineConfig.from_dict(config_dict)
+
+        # Создаём упрощённый pipeline object только для расчёта метрик
+        from argparse import Namespace
+        from dataclasses import dataclass, field
+
+        @dataclass
+        class TempPipeline:
+            args: Namespace
+            config: PipelineConfig
+            tables: dict
+            data_dir: Path
+            chunksize: int | None = None
+            out_dir: Path = field(default_factory=lambda: Path("/tmp"))
+            notes: list = field(default_factory=list)
+            warnings: list = field(default_factory=list)
+            sections: list = field(default_factory=list)
+            metrics_payload: dict = field(default_factory=lambda: {"sections": {}})
+            assumptions: list = field(default_factory=list)
+            headline: list = field(default_factory=list)
+            charts: dict = field(default_factory=dict)
+            unit: dict = field(default_factory=dict)
+            ab_result: dict | None = None
+            ab_group_col: str = "experiment_group"
+            quality: QualityReport | None = None
+
+        # Запускаем этапы до метрик (без отчётов)
+        temp_args = Namespace(
+            quiet=True,
+            adapter=None,
+            credit_risk=False,
+            drivers=False,
+            segment=False,
+            cohort=False,
+            migration=False,
+            vintage=False,
+            compare_dirs=None,
+            source="files",
+            pii_mode="strict",
+            format="docx,pdf,xlsx,pptx,rtf,html",
+            lifetime_months=12,
+        )
+        temp_p = TempPipeline(args=temp_args, config=temp_config, tables=p.tables, data_dir=p.data_dir, chunksize=p.chunksize, out_dir=p.out_dir)
+
+        # Копируем данные, если они уже загружены
+        if p.tables:
+            temp_p.tables = p.tables
+        else:
+            from .core import load_tables
+            temp_p.tables = load_tables(p.data_dir, p.chunksize)  # type: ignore[arg-type]
+
+        # Запускаем этапы (без отчётов)
+        from .core import validate_inputs
+        temp_p.quality = validate_inputs(temp_p.tables)
+        temp_p.warnings = list(temp_p.quality.warnings)
+        _init_metrics_payload(temp_p)  # type: ignore[arg-type]
+        _stage_plugins(temp_p)  # type: ignore[arg-type]
+        _stage_portfolio(temp_p)  # type: ignore[arg-type]
+        _stage_funnel(temp_p)  # type: ignore[arg-type]
+        _stage_ab_report(temp_p)  # type: ignore[arg-type]
+        _stage_segmentation(temp_p)  # type: ignore[arg-type]
+        _stage_cohort(temp_p)  # type: ignore[arg-type]
+        _stage_finance(temp_p)  # type: ignore[arg-type]
+        _stage_macro(temp_p)  # type: ignore[arg-type]
+        _stage_macro_tables(temp_p)  # type: ignore[arg-type]
+        _stage_comparison(temp_p)  # type: ignore[arg-type]
+        _stage_migration(temp_p)  # type: ignore[arg-type]
+        _stage_vintage(temp_p)  # type: ignore[arg-type]
+        _stage_credit_risk(temp_p)  # type: ignore[arg-type]
+        _stage_metrics(temp_p)  # type: ignore[arg-type]
+
+        return temp_p.metrics_payload
+
+    engine = ScenarioEngine(
+        base_config=base_config,
+        run_pipeline_fn=run_pipeline_fn,
+        key_metrics_extractor=extract_key_metrics_from_payload,
+    )
+
+    scenarios_to_run: list[Scenario] = []
+
+    # 1. Загрузить из YAML файла
+    config_file = scenario_config.get("config_file")
+    if config_file:
+        from pathlib import Path
+
+        import yaml
+        with open(config_file, encoding="utf-8") as f:
+            scenario_data = yaml.safe_load(f) or {}
+        if "scenarios" in scenario_data:
+            for s in scenario_data["scenarios"]:
+                scenarios_to_run.append(Scenario(
+                    name=s.get("name", "unnamed"),
+                    params=s.get("params", {}),
+                    description=s.get("description", ""),
+                ))
+
+    # 2. Встроенные пресеты
+    preset = scenario_config.get("preset")
+    if preset:
+        standard = create_standard_scenarios()
+        if preset == "standard":
+            scenarios_to_run.extend(standard)
+        elif preset == "all":
+            scenarios_to_run.extend(standard)
+
+    # 3. Переопределения параметров через CLI
+    cli_params = scenario_config.get("params", {})
+    if cli_params:
+        # Если есть базовый сценарий, применяем к нему
+        if scenarios_to_run:
+            base_scenario = scenarios_to_run[0]
+            for key, value in cli_params.items():
+                base_scenario.params[key] = value
+        else:
+            # Создаём один сценарий с этими параметрами
+            scenarios_to_run.append(Scenario(
+                name="custom",
+                params=cli_params,
+                description="Custom scenario from CLI params",
+            ))
+
+    if not scenarios_to_run:
+        p.notes.append("Сценарный анализ: нет сценариев для запуска")
+        return
+
+    p.notes.append(f"Сценарный анализ: запуск {len(scenarios_to_run)} сценариев...")
+
+    # Запускаем все сценарии
+    results = engine.run_all(scenarios=scenarios_to_run)
+
+    # Сохраняем результаты
+    df = scenario_results_to_dataframe(results)
+    summary = scenario_results_summary(results)
+
+    # Добавляем в разделы отчёта
+    if not df.empty:
+        p.sections.append(("Сценарии: сравнение", df, "Сравнение ключевых метрик по сценариям"))
+
+        # В metrics_payload
+        p.metrics_payload["sections"]["scenarios"] = {
+            "comparison": df.to_dict(orient="records"),
+            "summary": summary,
+            "scenarios_count": len(results),
+        }
+
+        p.notes.append(f"Сценарии: выполнено {len(results)} сценариев")
+    else:
+        p.warnings.append("Сценарии: не получены результаты")
+
+
 def _stage_metrics(p: _Pipeline) -> None:
     """Плоские метрики: metrics.json и metrics.csv для сверки значений."""
     # metrics.csv — плоский список чисел для сверки: разделы, ключевые
@@ -1844,6 +2161,8 @@ def run(args: argparse.Namespace) -> int:
     assert p.quality is not None
     p.warnings = list(p.quality.warnings)
     _init_metrics_payload(p)
+    _stage_plugins(p)
+    _stage_scenario(p)
     _stage_portfolio(p)
     _stage_funnel(p)
     _stage_ab_report(p)
