@@ -189,10 +189,16 @@ def load_tables_streaming(
         except Exception as exc:
             raise DataLoadError([f"{path.name}: {type(exc).__name__}: {exc}"], {})
 
-    # Итеративно выдаем чанки
+    # Итеративно выдаем чанки. Excel-таблицы читаются целиком и попадают
+    # только в первый чанк (или в единственный, если CSV нет): иначе они
+    # дублировались бы в каждом чанке и агрегаты завышались.
     active_readers = set(readers.keys())
-    while active_readers:
-        chunk_tables = dict(excel_tables)  # Excel таблицы в каждом чанке
+    excel_pending = bool(excel_tables)
+    while active_readers or excel_pending:
+        chunk_tables: dict[str, pd.DataFrame] = {}
+        if excel_pending:
+            chunk_tables.update(excel_tables)
+            excel_pending = False
         to_remove = set()
         for name in active_readers:
             try:

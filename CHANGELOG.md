@@ -1,5 +1,66 @@
 # Changelog
 
+## 2.2.0 — 2026-11-28
+
+**Добавлено**
+
+- **Streamlit UI (Priority 1):**
+  - Новый модуль `finanalyst/streamlit_app.py` — интерактивный веб-интерфейс
+  - 7 страниц: Загрузка данных, Конфигурация, Запуск, Результаты, Сценарии, Графики, Отчёты
+  - Drag-and-drop загрузка CSV/Excel/Parquet с валидацией колонок
+  - Полная форма конфигурации пайплайна (все модули, параметры прогноза, качество данных)
+  - Прогресс-бар с 20 этапами пайплайна в реальном времени
+  - Ключевые метрики после завершения: портфель, финансы, юнит-экономика
+  - Сценарийный анализ: таблица сравнения, бар-чарты отклонений, сводка %
+  - Графики: портфель (PAR, баланс), воронка, прогноз, комбинированный дашборд
+  - Отчёты: скачивание docx/pdf/xlsx/pptx/rtf/html, просмотр metrics.json
+  - Entry point: `financial-analyst-streamlit`
+
+- **Регуляторные отчёты (Priority 2):**
+  - Новый модуль `finanalyst/regulatory.py`
+  - Форма 101: Отчёт о финансовом положении (КоФ ЦБ РФ, Приказ 5610-У)
+  - Форма 102: Отчёт о финансовых результатах (КоФ ЦБ РФ)
+  - 135-ФЗ / НБКИ: Выгрузка для БКИ (Приказ 4828-У)
+  - Basel III Pillar 3: Капитал (CET1/Tier1/Total), RWA, LCR, NSFR, концентрация
+  - CLI флаги: `--regulatory`, `--reg-reports`, `--org-name`, `--org-bik`, `--org-inn`, `--org-okpo`, `--reporting-date`, `--reg-formats`
+  - Экспорт в JSON и XLSX (по листам на секции)
+
+- **BI-интеграция (Priority 3):**
+  - Новый модуль `finanalyst/bi_integration.py`
+  - Файловые экспортеры: Parquet, CSV, Feather (Arrow), XLSX, JSONL
+  - DWH коннекторы: ClickHouse (clickhouse-connect/SQLAlchemy), PostgreSQL (SQLAlchemy+psycopg), BigQuery (google-cloud-bigquery)
+  - PowerBI: генерация JSON модели для импорта в PBIX
+  - Tableau: генерация .hyper файлов (tableauhyperapi)
+  - Приведение метрик payload к плоским таблицам для BI
+  - Реестр экспортеров/коннекторов для расширения
+
+- **Memory-efficient режим (Priority 4):**
+  - Новый модуль `finanalyst/memory_efficient.py`
+  - Инкрементальные агрегаторы: Portfolio, Finance, Funnel, Clients
+  - PartitionedProcessor: партиционирование по времени (M/Q/W) и/или продукту
+  - ParallelChunkProcessor: ThreadPool / ProcessPool с батчами чанков
+  - StreamingPipeline: полный streaming-пайплайн с инкрементальными метриками
+  - CLI: `--streaming`, `--chunksize`, `--mem-workers`, `--mem-processes`, `--partition-by-time`, `--partition-by-product`, `--time-freq`, `--skip-heavy-metrics`, `--max-rows-full`
+
+- **Тесты:**
+  - `tests/test_scenario.py` — 53 теста (unit + integration + property-based)
+  - `tests/test_property.py` — 11 property-based тестов (Hypothesis)
+  - `tests/test_v220_modules.py` — 17 smoke-тестов regulatory, BI и memory-efficient
+
+- **Исправлено:**
+  - BI-экспорт: плоский `summary` секции больше не падает при разборе сценарной сводки
+  - Memory-efficient: воронка читается из `funnel_events`/`sales` (раньше раздел был пустым), Excel-таблицы обрабатываются один раз, партиционирование больше не дублирует строки, этапы сортируются по `STAGE_ORDER`, статистика чанков заполняется
+  - Streaming-загрузка: Excel-таблицы отдаются только в первом чанке (раньше дублировались в каждом), CLI не перезаписывает нормализованные и очищенные от ПДн таблицы исходными
+  - `--mem-processes`: ProcessPoolExecutor получает пиклируемые функции и фабрики (раньше падал с `AttributeError: Can't pickle local object`)
+  - SKILL.md: описание уложено в лимит 300 символов
+  - mypy: устранены ошибки типизации в `memory_efficient.py`
+
+- **Инфраструктура:**
+  - `pyproject.toml`: optional dependency `streamlit`, entry points `financial-analyst-streamlit`, `financial-analyst`
+  - SKILL.md description updated (300 chars)
+  - README.md: таблица флагов, разделы Streamlit, Regulatory, BI, Memory-efficient
+  - Удалены устаревшие handoff/промт-файлы прошлых сессий
+
 ## 2.1.9 — 2026-11-26
 
 **Добавлено**

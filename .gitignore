@@ -6,9 +6,14 @@ venv/
 env/
 reports/
 charts/
+bi_export/
 *.log
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+.hypothesis/
+.coverage
+htmlcov/
 .DS_Store
 Thumbs.db
 .idea/

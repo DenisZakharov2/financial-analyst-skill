@@ -29,6 +29,10 @@ market statistics, anomaly detection and trend forecasting with reproducible rep
 | Сравнение срезов | **схема + портфельный Bridge (New / Churn / Expansion / Contraction, retention, NRR), P&L variance** |
 | ПДн | **обнаружение и псевдонимизация (strict/redact/off)** |
 | Отчёты | DOCX, PDF, XLSX, PPTX, RTF, HTML-дашборд (интерактивный Plotly, офлайн) |
+| Streamlit UI | веб-интерфейс: загрузка данных, конфигурация, запуск, результаты, сценарии, графики, отчёты |
+| Регуляторная отчётность | КоФ 101/102 (ЦБ РФ), НБКИ 135-ФЗ, Basel III Pillar 3 |
+| BI-интеграция | Parquet/CSV/Feather/XLSX/JSONL, ClickHouse/PostgreSQL/BigQuery, PowerBI/Tableau |
+| Большие данные | memory-efficient streaming, партиционирование по времени/продукту, параллельные чанки |
 
 ## Флаги расширенных расчётов
 
@@ -46,6 +50,15 @@ market statistics, anomaly detection and trend forecasting with reproducible rep
 | `--config` | Путь к YAML-конфигу с декларативной настройкой пайплайна (перезаписывается CLI-флагами) |
 | `--source {files,postgres}` | Источник данных: файлы (CSV/Excel) или PostgreSQL (требует `--pg-*` флаги) |
 | `--pg-host`, `--pg-port`, `--pg-database`, `--pg-user`, `--pg-password`, `--pg-schema`, `--pg-chunksize` | Параметры подключения к PostgreSQL (также через ENV: PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD, PGSCHEMA, PGCHUNKSIZE) |
+| `--regulatory` | Регуляторные отчёты: КоФ 101/102, НБКИ 135-ФЗ, Basel III Pillar 3 |
+| `--reg-reports`, `--org-name`, `--org-bik`, `--org-inn`, `--org-okpo`, `--reporting-date`, `--reg-formats` | Настройка регуляторных отчётов: формы, реквизиты, дата, форматы (`json,xlsx`) |
+| `--bi-export` | Экспорт `metrics.json` в плоские таблицы для BI |
+| `--bi-formats`, `--bi-output-dir`, `--bi-compression`, `--bi-partition-by` | Настройка BI-экспорта: форматы (`parquet,csv,feather,xlsx,jsonl`), каталог, сжатие, партиции |
+| `--dwh`, `--dwh-if-exists`, `--ch-*`, `--dwh-pg-*`, `--bq-*` | Загрузка метрик в ClickHouse, PostgreSQL или BigQuery |
+| `--streaming` | Memory-efficient streaming-пайплайн для больших выгрузок |
+| `--chunksize`, `--mem-workers`, `--mem-processes` | Размер чанка и параллелизм streaming-режима |
+| `--partition-by-time`, `--partition-by-product`, `--time-freq` | Партиционирование чанков по времени (`M`/`Q`/`W`) и продукту |
+| `--skip-heavy-metrics`, `--max-rows-full` | Отключение тяжёлых метрик и порог строк для полного режима |
 
 Расширенные расчёты требуют `scipy` (входит в `requirements.txt`). Если пакет не
 установлен, базовый расчёт работает как прежде, а расширенные разделы
@@ -265,6 +278,82 @@ financial-analyst --scenario-list standard --scenario-param finance.forecast_rat
 - Сводка отклонений от базового сценария (абсолютные и процентные)
 - В `metrics.json` секция `scenarios` с полными результатами
 
+## Streamlit UI
+
+Интерактивный веб-интерфейс для запуска пайплайна без командной строки:
+
+```bash
+pip install -e ".[streamlit]"
+financial-analyst-streamlit
+```
+
+Страницы: загрузка данных (drag-and-drop CSV/Excel/Parquet), конфигурация
+пайплайна, запуск с прогресс-баром, результаты, сравнение сценариев, графики,
+скачивание отчётов (DOCX/PDF/XLSX/PPTX/RTF/HTML).
+
+Без установки entry point:
+
+```bash
+streamlit run skills/financial-analyst/scripts/finanalyst/streamlit_app.py
+```
+
+## Регуляторные отчёты (--regulatory)
+
+```bash
+financial-analyst --data-dir ./data --out ./reports --regulatory
+```
+
+Формы:
+
+- **101** — отчёт о финансовом положении (КоФ ЦБ РФ, Приказ 5610-У);
+- **102** — отчёт о финансовых результатах;
+- **135-ФЗ / НБКИ** — выгрузка сведений о заёмщиках (Приказ 4828-У);
+- **Basel III Pillar 3** — капитал (CET1/Tier1/Total), RWA, LCR, NSFR, концентрация.
+
+Выбор форм и реквизиты:
+
+```bash
+financial-analyst --regulatory \
+  --reg-reports cof_101 cof_102 basel_pillar3 \
+  --org-name "АО «Банк»" --org-bik 044525225 \
+  --org-inn 7707083893 --org-okpo 12345678 \
+  --reporting-date 2026-09-30 \
+  --reg-formats json,xlsx
+```
+
+Результаты сохраняются в `reports/regulatory/`: JSON и XLSX (по листу на секцию).
+
+## BI-интеграция (--bi-export)
+
+```bash
+financial-analyst --data-dir ./data --out ./reports \
+  --bi-export --bi-formats parquet,csv,jsonl --bi-output-dir ./bi_export
+```
+
+- Файловые форматы: Parquet, CSV, Feather, XLSX, JSONL.
+- Плоские таблицы: `headline`, `quality_checks`, `section_*`, `summary_*`,
+  `totals_*`, `scenario_summary_*` — готовы для загрузки в BI.
+- DWH: ClickHouse, PostgreSQL, BigQuery (нужны соответствующие драйверы).
+- PowerBI: JSON-модель; Tableau: `.hyper` (при установленном `tableauhyperapi`).
+
+Для больших выгрузок доступно партиционирование: `--bi-partition-by product_code`.
+
+## Memory-efficient режим (--streaming)
+
+Для выгрузок, которые не помещаются в память:
+
+```bash
+financial-analyst --data-dir ./data --out ./reports \
+  --streaming --chunksize 100000 --mem-workers 4 \
+  --partition-by-time --partition-by-product
+```
+
+- Инкрементальные агрегаторы: портфель, финансы, воронка, клиенты.
+- Партиционирование по времени (`--time-freq M|Q|W`) и продукту.
+- Параллельная обработка чанков: потоки по умолчанию, `--mem-processes` — процессы.
+- `--skip-heavy-metrics` отключает кредитный риск, прогноз, драйверы и сценарии.
+- `--max-rows-full N` — порог строк, выше которого тяжёлые метрики пропускаются.
+
 ## Установка как скилла Hermes
 
 ```bash
@@ -283,7 +372,7 @@ skills/financial-analyst/
 ├── scripts/
 │   ├── analyze.py            # CLI
 │   ├── check_skill.py        # самопроверка скилла
-│   └── finanalyst/           # ядро: метрики, графики, отчёты
+│   └── finanalyst/           # ядро: метрики, графики, отчёты, Streamlit, regulatory, BI, streaming
 ├── templates/                # бриф, постановка задачи, каркас отчёта
 └── assets/
     ├── sample/               # синтетическая выгрузка для запуска

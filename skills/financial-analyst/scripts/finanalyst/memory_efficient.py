@@ -23,7 +23,80 @@ from typing import Any, Callable, Iterator
 import numpy as np
 import pandas as pd
 
-from .core import load_tables_streaming
+from .core import STAGE_ORDER, STAGE_RANK, load_tables_streaming
+
+# Группы синонимов: одна и та же сущность в разных выгрузках. В агрегатор
+# попадает только один источник из группы (первый найденный по приоритету),
+# иначе portfolio+accounts или funnel_events+sales считались бы дважды.
+ALIAS_GROUPS: dict[str, tuple[str, ...]] = {
+    "portfolio": ("portfolio", "accounts"),
+    "funnel": ("funnel_events", "funnel", "sales", "applications"),
+}
+
+# Имена таблиц, которые наполняют каждый инкрементальный агрегатор.
+TABLE_TO_AGGREGATOR: dict[str, str] = {
+    alias: group for group, aliases in ALIAS_GROUPS.items() for alias in aliases
+}
+TABLE_TO_AGGREGATOR.update({"finance": "finance", "clients": "clients"})
+
+
+def _table_names(data_dir: Path) -> set[str]:
+    return {
+        path.stem.strip().lower().replace("ё", "е")
+        for path in data_dir.iterdir()
+        if path.is_file() and path.suffix.lower() in {".csv", ".xls", ".xlsx"}
+    }
+
+
+def resolve_source_tables(data_dir: Path) -> dict[str, str]:
+    """Выбрать по одному источнику на группу синонимов.
+
+    Приоритет: ``portfolio`` важнее ``accounts``, ``funnel_events`` важнее
+    ``sales``. Без этого агрегаторы суммировали бы дубли.
+    """
+    names = _table_names(data_dir)
+    resolved: dict[str, str] = {}
+    for group, candidates in ALIAS_GROUPS.items():
+        for candidate in candidates:
+            if candidate in names:
+                resolved[group] = candidate
+                break
+    return resolved
+
+
+def resolve_sources_from_tables(chunk_tables: dict[str, pd.DataFrame]) -> dict[str, str]:
+    """Выбрать источник каждой группы по составу чанка (для параллельных воркеров)."""
+    present = set(chunk_tables)
+    resolved: dict[str, str] = {}
+    for group, candidates in ALIAS_GROUPS.items():
+        for candidate in candidates:
+            if candidate in present:
+                resolved[group] = candidate
+                break
+    return resolved
+
+
+def update_aggregators(
+    aggregators: dict[str, "IncrementalAggregator"],
+    chunk_tables: dict[str, pd.DataFrame],
+    sources: dict[str, str],
+) -> int:
+    """Обновить агрегаторы одним чанком. Возвращает число обработанных строк."""
+    total_rows = 0
+    for name, df in chunk_tables.items():
+        if df is None or df.empty:
+            continue
+        total_rows += len(df)
+        target = TABLE_TO_AGGREGATOR.get(name)
+        if not target or target not in aggregators:
+            continue
+        chosen = sources.get(target)
+        # Синоним, не выбранный источником группы, пропускаем.
+        if chosen is not None and name != chosen:
+            continue
+        aggregators[target].update(df)
+    return total_rows
+
 
 # ============================================================
 # Конфигурация
@@ -193,21 +266,26 @@ class PortfolioAggregator(IncrementalAggregator):
         }
 
 
+def _new_period_bucket() -> dict[str, float | int]:
+    """Фабрика пустого аккумулятора периода (module-level, чтобы агрегатор пиклился)."""
+    return {
+        "interest_income": 0.0,
+        "interest_expense": 0.0,
+        "fee_income": 0.0,
+        "funding_cost": 0.0,
+        "opex": 0.0,
+        "reserve_expense": 0.0,
+        "tax": 0.0,
+        "marketing_cost": 0.0,
+        "rows": 0,
+    }
+
+
 class FinanceAggregator(IncrementalAggregator):
     """Инкрементальная агрегация финансов."""
 
     def __init__(self):
-        self.periods: dict[str, dict] = defaultdict(lambda: {
-            "interest_income": 0.0,
-            "interest_expense": 0.0,
-            "fee_income": 0.0,
-            "funding_cost": 0.0,
-            "opex": 0.0,
-            "reserve_expense": 0.0,
-            "tax": 0.0,
-            "marketing_cost": 0.0,
-            "rows": 0,
-        })
+        self.periods: dict[str, dict] = defaultdict(_new_period_bucket)
         self.product_codes_set: set = set()
 
     def update(self, chunk: pd.DataFrame) -> None:
@@ -291,25 +369,36 @@ class FunnelAggregator(IncrementalAggregator):
 
     def merge(self, other: IncrementalAggregator) -> None:
         other_fun = other  # type: ignore[assignment]
-        for k, v in other_fun.stage_counts.items():
-            self.stage_counts[k] += v
-        for k, v in other_fun.period_stage.items():
-            self.period_stage[k] += v
-        for k, v in other_fun.product_stage.items():
-            self.product_stage[k] += v
+        for stage_key, stage_val in other_fun.stage_counts.items():
+            self.stage_counts[stage_key] += stage_val
+        for period_key, period_val in other_fun.period_stage.items():
+            self.period_stage[period_key] += period_val
+        for product_key, product_val in other_fun.product_stage.items():
+            self.product_stage[product_key] += product_val
 
     def finalize(self) -> dict[str, Any]:
-        total_start = self.stage_counts.get("application", self.stage_counts.get("lead", 0))
+        total_start = self.stage_counts.get(STAGE_ORDER[0], 0)
         rows = []
-        for stage, count in sorted(self.stage_counts.items()):
+        ordered = sorted(
+            self.stage_counts.items(),
+            key=lambda item: (STAGE_RANK.get(item[0], len(STAGE_RANK) + 1), item[0]),
+        )
+        for stage, count in ordered:
             pct = count / total_start * 100 if total_start > 0 else 0
             rows.append({"stage": stage, "count": count, "from_start_pct": round(pct, 2)})
 
+        # Ключи-кортежи не сериализуются в JSON: склеиваем через «|».
         return {
             "total_start": total_start,
             "stages": rows,
-            "period_stage": dict(self.period_stage),
-            "product_stage": dict(self.product_stage),
+            "period_stage": {
+                f"{period}|{stage}": count
+                for (period, stage), count in self.period_stage.items()
+            },
+            "product_stage": {
+                f"{product}|{stage}": count
+                for (product, stage), count in self.product_stage.items()
+            },
         }
 
 
@@ -411,36 +500,19 @@ class PartitionedProcessor:
         self,
         chunk_tables: dict[str, pd.DataFrame],
     ) -> Iterator[tuple[str, dict[str, pd.DataFrame]]]:
-        """Итератор по партициям."""
-        # Объединяем ключи по всем таблицам
-        all_keys = []
+        """Итератор по партициям.
+
+        Каждая таблица партиционируется независимо: таблицы в чанке не
+        выровнены по строкам (у портфеля и финансов разное число строк),
+        поэтому общий ключ по всем таблицам дублировал бы данные.
+        """
         for name, df in chunk_tables.items():
-            if df is not None and not df.empty:
-                key = self.get_partition_key(df)
-                all_keys.append(key)
-
-        if not all_keys:
-            return
-
-        # Общий ключ партиционирования
-        combined_key = all_keys[0]
-        for k in all_keys[1:]:
-            # Используем только первые N строк для совместимости
-            min_len = min(len(combined_key), len(k))
-            combined_key = combined_key.iloc[:min_len] + "|" + k.iloc[:min_len]
-
-        unique_partitions = combined_key.unique()
-
-        for part_key in unique_partitions:
-            mask = combined_key == part_key
-            partitioned_tables = {}
-            for name, df in chunk_tables.items():
-                if df is not None and not df.empty and len(df) == len(mask):
-                    partitioned_tables[name] = df[mask]
-                elif df is not None and not df.empty:
-                    # Таблицы без партиционирования (Excel, макро) — во все партиции
-                    partitioned_tables[name] = df
-            yield part_key, partitioned_tables
+            if df is None or df.empty:
+                continue
+            key = self.get_partition_key(df)
+            for part_key in key.unique():
+                mask = key == part_key
+                yield f"{name}|{part_key}", {name: df[mask]}
 
 
 # ============================================================
@@ -457,6 +529,26 @@ class ChunkResult:
     metrics: dict[str, Any] | None = None
 
 
+def _process_batch(
+    batch: list[tuple[dict[str, pd.DataFrame], int]],
+    sources: dict[str, str],
+) -> dict[str, "IncrementalAggregator"]:
+    """Обработать батч чанков в отдельном процессе/потоке.
+
+    Функция объявлена на уровне модуля: локальные функции и замыкания
+    нельзя передать в ProcessPoolExecutor (они не пиклятся).
+    """
+    aggregators: dict[str, IncrementalAggregator] = {
+        "portfolio": PortfolioAggregator(),
+        "finance": FinanceAggregator(),
+        "funnel": FunnelAggregator(),
+        "clients": ClientsAggregator(),
+    }
+    for chunk_tables, _chunk_idx in batch:
+        update_aggregators(aggregators, chunk_tables, sources)
+    return aggregators
+
+
 class ParallelChunkProcessor:
     """Параллельная обработка чанков."""
 
@@ -469,6 +561,8 @@ class ParallelChunkProcessor:
         self.n_workers = n_workers or min(mp.cpu_count(), 8)
         self.use_processes = use_processes
         self.chunk_processor = chunk_processor or self._default_processor
+        self.total_chunks = 0
+        self.partition_metrics: dict[str, int] = {}
 
     def _default_processor(
         self,
@@ -482,13 +576,8 @@ class ParallelChunkProcessor:
             "funnel": FunnelAggregator(),
             "clients": ClientsAggregator(),
         }
-
-        total_rows = 0
-        for name, df in chunk_tables.items():
-            if df is not None and not df.empty:
-                if name in aggregators:
-                    aggregators[name].update(df)
-                total_rows += len(df)
+        sources = resolve_sources_from_tables(chunk_tables)
+        total_rows = update_aggregators(aggregators, chunk_tables, sources)
 
         return ChunkResult(
             partition_key="default",
@@ -508,57 +597,37 @@ class ParallelChunkProcessor:
         if partitioner is None:
             partitioner = PartitionedProcessor(PartitionConfig())
 
-        # Сначала читаем Excel файлы
-        excel_tables: dict[str, pd.DataFrame] = {}
-        for path in sorted(data_dir.iterdir()):
-            if path.suffix.lower() in (".xlsx", ".xls") and path.is_file():
-                if any(path.name.startswith(p) for p in skip_patterns):
-                    continue
-                try:
-                    name = path.stem.strip().lower()
-                    excel_tables[name] = pd.read_excel(path, sheet_name=0)
-                except Exception:
-                    pass
-
-        # Подготавливаем чанки для параллельной обработки
+        # Подготавливаем чанки для параллельной обработки.
+        # Excel-таблицы core.load_tables_streaming отдаёт один раз — в первом чанке.
         chunk_batches: list[list[tuple[dict[str, pd.DataFrame], int]]] = [[] for _ in range(self.n_workers)]
         batch_idx = 0
+        sources = resolve_source_tables(data_dir)
 
-        for chunk_idx, chunk_tables in enumerate(load_tables_streaming(data_dir, chunksize, skip_patterns)):
-            # Добавляем Excel таблицы
-            for name, df in excel_tables.items():
-                chunk_tables[name] = df
-
-            # Партиционируем если нужно
+        def schedule(chunk_tables: dict[str, pd.DataFrame], chunk_idx: int) -> None:
+            nonlocal batch_idx
+            self.total_chunks += 1
             if partitioner:
                 for part_key, part_tables in partitioner.iter_partitions(chunk_tables):
+                    self.partition_metrics[str(part_key)] = (
+                        self.partition_metrics.get(str(part_key), 0) + 1
+                    )
                     chunk_batches[batch_idx].append((part_tables, chunk_idx))
                     batch_idx = (batch_idx + 1) % self.n_workers
             else:
                 chunk_batches[batch_idx].append((chunk_tables, chunk_idx))
                 batch_idx = (batch_idx + 1) % self.n_workers
 
-        # Функция для обработки батча чанков
-        def process_batch(batch: list[tuple[dict[str, pd.DataFrame], int]]) -> dict[str, IncrementalAggregator]:
-            batch_aggregators = {
-                "portfolio": PortfolioAggregator(),
-                "finance": FinanceAggregator(),
-                "funnel": FunnelAggregator(),
-                "clients": ClientsAggregator(),
-            }
-
-            for chunk_tables, chunk_idx in batch:
-                for name, df in chunk_tables.items():
-                    if df is not None and not df.empty and name in batch_aggregators:
-                        batch_aggregators[name].update(df)
-
-            return batch_aggregators
+        for chunk_idx, chunk_tables in enumerate(load_tables_streaming(data_dir, chunksize, skip_patterns)):
+            schedule(chunk_tables, chunk_idx)
 
         # Параллельный запуск
         executor_class = concurrent.futures.ProcessPoolExecutor if self.use_processes else concurrent.futures.ThreadPoolExecutor
 
         with executor_class(max_workers=self.n_workers) as executor:
-            futures = [executor.submit(process_batch, batch) for batch in chunk_batches if batch]
+            futures = [
+                executor.submit(_process_batch, batch, sources)
+                for batch in chunk_batches if batch
+            ]
             results = [f.result() for f in concurrent.futures.as_completed(futures)]
 
         # Объединяем результаты
@@ -587,38 +656,27 @@ class ParallelChunkProcessor:
         if partitioner is None:
             partitioner = PartitionedProcessor(PartitionConfig())
 
-        # Excel файлы
-        excel_tables: dict[str, pd.DataFrame] = {}
-        for path in sorted(data_dir.iterdir()):
-            if path.suffix.lower() in (".xlsx", ".xls") and path.is_file():
-                if any(path.name.startswith(p) for p in skip_patterns):
-                    continue
-                try:
-                    name = path.stem.strip().lower()
-                    excel_tables[name] = pd.read_excel(path, sheet_name=0)
-                except Exception:
-                    pass
-
         aggregators = {
             "portfolio": PortfolioAggregator(),
             "finance": FinanceAggregator(),
             "funnel": FunnelAggregator(),
             "clients": ClientsAggregator(),
         }
+        sources = resolve_source_tables(data_dir)
 
-        for chunk_idx, chunk_tables in enumerate(load_tables_streaming(data_dir, chunksize, skip_patterns)):
-            for name, df in excel_tables.items():
-                chunk_tables[name] = df
-
+        def process_chunk(chunk_tables: dict[str, pd.DataFrame]) -> None:
+            self.total_chunks += 1
             if partitioner:
                 for part_key, part_tables in partitioner.iter_partitions(chunk_tables):
-                    for name, df in part_tables.items():
-                        if df is not None and not df.empty and name in aggregators:
-                            aggregators[name].update(df)
+                    self.partition_metrics[str(part_key)] = (
+                        self.partition_metrics.get(str(part_key), 0) + 1
+                    )
+                    update_aggregators(aggregators, part_tables, sources)
             else:
-                for name, df in chunk_tables.items():
-                    if df is not None and not df.empty and name in aggregators:
-                        aggregators[name].update(df)
+                update_aggregators(aggregators, chunk_tables, sources)
+
+        for chunk_tables in load_tables_streaming(data_dir, chunksize, skip_patterns):
+            process_chunk(chunk_tables)
 
         return aggregators
 
@@ -649,7 +707,7 @@ class StreamingPipeline:
         self.aggregators: dict[str, IncrementalAggregator] = {}
         self.total_rows = 0
         self.total_chunks = 0
-        self.partition_metrics: dict[str, dict] = {}
+        self.partition_metrics: dict[str, int] = {}
         self.notes: list[str] = []
         self.warnings: list[str] = []
 
@@ -680,10 +738,12 @@ class StreamingPipeline:
                 self.partitioner,
             )
 
-        # Подсчёт строк
+        # Подсчёт строк и статистики чанков
         for agg in self.aggregators.values():
             if hasattr(agg, "total_rows"):
                 self.total_rows += agg.total_rows
+        self.total_chunks = self.parallel_processor.total_chunks
+        self.partition_metrics = dict(self.parallel_processor.partition_metrics)
 
         self.notes.append(f"Обработано строк: {self.total_rows:,}")
 

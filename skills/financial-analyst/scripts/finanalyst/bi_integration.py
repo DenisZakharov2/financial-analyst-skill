@@ -840,10 +840,13 @@ def export_metrics_to_bi(
                 df["_section"] = section_name
                 tables[f"scenarios_{section_name}"] = df
 
-            # summary (сводка сценариев)
-            if "summary" in section_data and isinstance(section_data["summary"], dict):
+            # summary (сводка сценариев: значения — вложенные словари метрик)
+            summary = section_data.get("summary")
+            if isinstance(summary, dict) and summary and all(
+                isinstance(value, dict) for value in summary.values()
+            ):
                 rows = []
-                for scenario, diffs in section_data["summary"].items():
+                for scenario, diffs in summary.items():
                     for metric, value in diffs.items():
                         rows.append({
                             "scenario": scenario,

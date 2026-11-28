@@ -725,10 +725,7 @@ def _stage_load_streaming(p: _Pipeline) -> None:
     chunksize = p.chunksize
     assert chunksize is not None
     for chunk_tables in load_tables_streaming(p.data_dir, chunksize, skip_patterns=skip_patterns):
-        # Добавляем Excel таблицы к каждому чанку
-        for name, df in excel_tables.items():
-            chunk_tables[name] = df
-
+        # Excel-таблицы core отдаёт один раз — в первом чанке.
         # Нормализация и клиентский адаптер
         chunk_tables, alias_notes = client_csv.normalize(chunk_tables)
         if total_chunks == 0:
@@ -798,8 +795,14 @@ def _stage_load_streaming(p: _Pipeline) -> None:
     if agg_sales:
         tables["sales"] = pd.concat(agg_sales, ignore_index=True)
 
-    # Добавляем Excel таблицы
-    tables.update(excel_tables)
+    # Добавляем Excel-таблицы, которых не было в CSV-чанках (например, macro_survey).
+    # Уже накопленные из первого чанка версии не перезаписываем: они прошли
+    # нормализацию и защиту ПДн. Синонимы приводим к каноническим именам,
+    # чтобы accounts/applications не дублировали portfolio/sales.
+    excel_normalized, excel_notes = client_csv.normalize(excel_tables)
+    p.notes.extend(excel_notes)
+    for key, df in excel_normalized.items():
+        tables.setdefault(key, df)
 
     # Нормализация периодов для finance
     if "finance" in tables and "period" in tables["finance"].columns:

@@ -1,7 +1,7 @@
 ---
 name: financial-analyst
-description: "Финансовый аналитик для банков/финтеха: портфель и PAR/NPL, P&L bridge, воронка/TAT, юнит-экономика (CAC/ARPU/LTV), прогноз (Linear/ETS/ARX/SARIMAX), A/B-пилоты, RFM, макро ЦБ РФ, защита ПДн, кредитный риск (PD/LGD/EAD, Basel IRB), HTML-дашборд, плагины, сценарии. YAML-конфиг, PostgreSQL, streaming."
-version: 2.1.9
+description: "Финансовый аналитик: портфель, PAR/NPL, P&L bridge, воронка/TAT, юнит-экономика (LTV), прогноз (Linear/ETS/ARX/SARIMAX), A/B, RFM, макро ЦБ РФ, ПДн, кредитный риск (PD/LGD/EAD, Basel IRB), HTML-дашборд, плагины, сценарии, Streamlit, КоФ/НБКИ/Basel III, BI-экспорт, memory-efficient. YAML, PostgreSQL."
+version: 2.2.0
 author: Denis Zakharov (@DenisZakharov2), Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
